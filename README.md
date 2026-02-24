@@ -99,6 +99,7 @@ RisuToki 실행 파일(.exe)을 더블클릭하면 됩니다.
 .charx 파일을 열면 다음 항목들이 표시됩니다:
 
 <img width="269" height="365" alt="image" src="https://github.com/user-attachments/assets/80fc85c8-1b06-4094-a752-9ef99e765a10" />
+<img width="262" height="357" alt="image" src="https://github.com/user-attachments/assets/baa21125-ee5e-477b-855e-c79bbd2e122b" />
 
 #### 기본 항목
 | 항목 | 설명 | 편집 언어 |
