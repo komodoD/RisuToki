@@ -3487,7 +3487,7 @@ function applyDarkMode() {
   if (tokiImg) {
     if (tokiActive) {
       if (darkMode) loadTokiImage(RISU_DANCING, true);
-      else loadTokiImage(TOKI_IDLE, false);
+      else loadTokiImage(TOKI_DANCING, true);
     } else {
       if (darkMode) loadTokiImage(RISU_IDLE, false);
       else loadTokiImage(TOKI_IDLE, false);
@@ -3634,6 +3634,7 @@ function bgmOnTerminalData() {
 // ==================== Toki Avatar (Chromakey Canvas) ====================
 const TOKI_IDLE = '../../assets/icon.png';
 const TOKI_CUTE = '../../assets/toki-cute.gif';
+const TOKI_DANCING = '../../assets/Dancing_toki.gif';
 let tokiActive = false;
 
 // Echo filter: ignore terminal data within 300ms of user input
@@ -3757,6 +3758,7 @@ function showAvatarPicker() {
   const images = [
     { src: TOKI_IDLE, label: '토키 (기본)', chromakey: false },
     { src: TOKI_CUTE, label: '토키 (cute)', chromakey: true },
+    { src: TOKI_DANCING, label: '토키 (dancing)', chromakey: true },
     { src: RISU_IDLE, label: '아리스 (기본)', chromakey: false },
     { src: RISU_DANCING, label: '아리스 (dancing)', chromakey: true },
   ];
@@ -3924,7 +3926,7 @@ function setTokiActive(active) {
     } else if (darkMode) {
       loadTokiImage(RISU_DANCING, true);
     } else {
-      loadTokiImage(TOKI_IDLE, false);
+      loadTokiImage(TOKI_DANCING, true);
     }
     statusText.textContent = darkMode ? randomLine(RISU_WORKING_LINES) : randomLine(TOKI_WORKING_LINES);
   } else if (!active && tokiActive) {
