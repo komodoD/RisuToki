@@ -2,7 +2,7 @@
 <html lang="ko">
 <head>
   <meta charset="UTF-8">
-  <meta http-equiv="Content-Security-Policy" content="default-src 'self' 'unsafe-inline' 'unsafe-eval'; font-src 'self' data: blob:; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob:; media-src 'self' file: data:; worker-src 'self' blob:;">
+  <meta http-equiv="Content-Security-Policy" content="default-src 'self' 'unsafe-inline' 'unsafe-eval' 'wasm-unsafe-eval'; font-src * data: blob:; style-src * 'unsafe-inline'; img-src * data: blob:; media-src 'self' file: data:; worker-src 'self' blob:; connect-src * data: blob:;">
   <title>RisuToki</title>
   <link rel="stylesheet" href="style.css">
 </head>
@@ -44,21 +44,54 @@
     <div class="menu-item" data-menu="view">
       <span class="menu-label">보기</span>
       <div class="menu-dropdown">
-        <div class="menu-action" data-action="toggle-sidebar">사이드바 토글<span class="menu-shortcut">Ctrl+B</span></div>
+        <div class="menu-action" data-action="toggle-sidebar">항목 토글<span class="menu-shortcut">Ctrl+B</span></div>
         <div class="menu-action" data-action="toggle-terminal">터미널 토글<span class="menu-shortcut">Ctrl+`</span></div>
         <div class="menu-action" data-action="toggle-avatar">아바타 토글</div>
         <div class="menu-sep"></div>
-        <div class="menu-action" data-action="sidebar-left">사이드바 → 좌측</div>
-        <div class="menu-action" data-action="sidebar-right">사이드바 → 우측</div>
+        <div class="menu-sub">
+          <span>항목 배치</span><span class="menu-arrow">▸</span>
+          <div class="menu-submenu">
+            <div class="menu-action" data-action="items-left">좌측</div>
+            <div class="menu-action" data-action="items-right">우측</div>
+            <div class="menu-action" data-action="items-far-left">좌끝</div>
+            <div class="menu-action" data-action="items-far-right">우끝</div>
+            <div class="menu-action" data-action="items-top">상단</div>
+            <div class="menu-action" data-action="items-bottom">하단</div>
+          </div>
+        </div>
+        <div class="menu-sub">
+          <span>참고자료 배치</span><span class="menu-arrow">▸</span>
+          <div class="menu-submenu">
+            <div class="menu-action" data-action="refs-sidebar">사이드바</div>
+            <div class="menu-action" data-action="refs-left">좌측</div>
+            <div class="menu-action" data-action="refs-right">우측</div>
+            <div class="menu-action" data-action="refs-far-left">좌끝</div>
+            <div class="menu-action" data-action="refs-far-right">우끝</div>
+            <div class="menu-action" data-action="refs-top">상단</div>
+            <div class="menu-action" data-action="refs-bottom">하단</div>
+          </div>
+        </div>
+        <div class="menu-sub">
+          <span>터미널 배치</span><span class="menu-arrow">▸</span>
+          <div class="menu-submenu">
+            <div class="menu-action" data-action="terminal-bottom">하단</div>
+            <div class="menu-action" data-action="terminal-left">좌측</div>
+            <div class="menu-action" data-action="terminal-right">우측</div>
+            <div class="menu-action" data-action="terminal-far-left">좌끝</div>
+            <div class="menu-action" data-action="terminal-far-right">우끝</div>
+            <div class="menu-action" data-action="terminal-top">상단</div>
+          </div>
+        </div>
         <div class="menu-sep"></div>
-        <div class="menu-action" data-action="terminal-bottom">터미널 → 하단</div>
-        <div class="menu-action" data-action="terminal-right">터미널 → 우측</div>
+        <div class="menu-action" data-action="layout-reset">레이아웃 초기화</div>
         <div class="menu-sep"></div>
         <div class="menu-action" data-action="zoom-in">확대<span class="menu-shortcut">Ctrl++</span></div>
         <div class="menu-action" data-action="zoom-out">축소<span class="menu-shortcut">Ctrl+-</span></div>
         <div class="menu-action" data-action="zoom-reset">기본 크기<span class="menu-shortcut">Ctrl+0</span></div>
         <div class="menu-sep"></div>
         <div class="menu-action" data-action="toggle-dark">다크 모드 토글</div>
+        <div class="menu-sep"></div>
+        <div class="menu-action" data-action="preview-test">프리뷰 테스트<span class="menu-shortcut">F5</span></div>
         <div class="menu-sep"></div>
         <div class="menu-action" data-action="devtools">개발자 도구<span class="menu-shortcut">F12</span></div>
       </div>
@@ -79,59 +112,89 @@
     <span id="file-label"></span>
   </div>
 
-  <!-- App Body (flex wrapper for layout switching) -->
+  <!-- App Body (slot-based layout) -->
   <div id="app-body">
-    <!-- Main content -->
-    <div id="main-container">
-      <!-- Sidebar -->
-      <div id="sidebar">
-        <!-- 항목 (상단) -->
-        <div class="sidebar-section" id="sidebar-items-section">
-          <div class="sidebar-header">
-            <span>항목</span>
-            <div class="sidebar-header-btns">
-              <button id="btn-sidebar-collapse" class="panel-collapse-btn" title="사이드바 접기">◀</button>
-            </div>
-          </div>
-          <div id="sidebar-tree"></div>
+    <!-- Slot: far-left -->
+    <div id="slot-far-left" class="layout-slot slot-v"></div>
+    <div id="resizer-far-left" class="slot-resizer slot-resizer-v"></div>
+
+    <!-- Center column -->
+    <div id="layout-center">
+      <!-- Slot: top -->
+      <div id="slot-top" class="layout-slot slot-h"></div>
+      <div id="resizer-top" class="slot-resizer slot-resizer-h"></div>
+
+      <!-- Main row -->
+      <div id="main-container">
+        <!-- Slot: left (sidebar default) -->
+        <div id="slot-left" class="layout-slot slot-v active"></div>
+        <div id="resizer-left" class="slot-resizer slot-resizer-v active"></div>
+
+        <!-- Editor area (always center) -->
+        <div id="editor-area">
+          <div id="editor-tabs"></div>
+          <div id="editor-container"></div>
         </div>
-        <!-- 리사이저 -->
-        <div id="sidebar-split-resizer" class="resizer resizer-h"></div>
-        <!-- 참고자료 (하단) -->
-        <div class="sidebar-section" id="sidebar-refs-section">
-          <div class="sidebar-header sidebar-header-refs">
-            <span>참고자료</span>
-            <div class="sidebar-header-btns">
-              <button id="btn-refs-popout" class="panel-collapse-btn" title="팝아웃">↗</button>
-              <button id="btn-refs-collapse" class="panel-collapse-btn" title="참고자료 접기">▼</button>
-              <button id="btn-refs-close" class="panel-collapse-btn" title="참고자료 닫기">✕</button>
-            </div>
-          </div>
-          <div id="sidebar-refs"></div>
-        </div>
+
+        <!-- Slot: right -->
+        <div id="resizer-right" class="slot-resizer slot-resizer-v"></div>
+        <div id="slot-right" class="layout-slot slot-v"></div>
       </div>
 
-      <!-- Resize handle -->
-      <div id="sidebar-resizer" class="resizer"></div>
+      <!-- Slot: bottom (terminal default) -->
+      <div id="resizer-bottom" class="slot-resizer slot-resizer-h active"></div>
+      <div id="slot-bottom" class="layout-slot slot-h active"></div>
+    </div>
 
-      <!-- Sidebar expand strip (visible when sidebar hidden) -->
-      <div id="sidebar-expand" title="사이드바 열기">▶</div>
+    <!-- Slot: far-right -->
+    <div id="resizer-far-right" class="slot-resizer slot-resizer-v"></div>
+    <div id="slot-far-right" class="layout-slot slot-v"></div>
 
-      <!-- Editor area -->
-      <div id="editor-area">
-        <div id="editor-tabs"></div>
-        <div id="editor-container"></div>
+    <!-- ═══ Movable Panels (JS places into slots) ═══ -->
+
+    <!-- Items panel (sidebar) -->
+    <div id="sidebar">
+      <div class="sidebar-section" id="sidebar-items-section">
+        <div class="sidebar-header">
+          <span>항목</span>
+          <div class="sidebar-header-btns">
+            <button id="btn-sidebar-collapse" class="panel-collapse-btn" title="접기">◀</button>
+          </div>
+        </div>
+        <div id="sidebar-tree"></div>
+      </div>
+      <div id="sidebar-split-resizer" class="resizer resizer-h"></div>
+      <div class="sidebar-section" id="sidebar-refs-section">
+        <div class="sidebar-header sidebar-header-refs">
+          <span>참고자료</span>
+          <div class="sidebar-header-btns">
+            <button id="btn-refs-extpopout" class="panel-collapse-btn" title="팝아웃 (외부 창)" data-popout-panel="refs">↗</button>
+            <button id="btn-refs-separate" class="panel-collapse-btn" title="분리">⧉</button>
+            <button id="btn-refs-collapse" class="panel-collapse-btn" title="접기">▼</button>
+            <button id="btn-refs-close" class="panel-collapse-btn" title="닫기">✕</button>
+          </div>
+        </div>
+        <div id="sidebar-refs"></div>
       </div>
     </div>
 
-    <!-- Bottom/Right area: Avatar + TokiTalk Terminal -->
-    <div id="terminal-resizer" class="resizer resizer-h"></div>
+    <!-- Refs panel (when separated from sidebar) -->
+    <div id="refs-panel">
+      <div class="refs-panel-header">
+        <span>참고자료</span>
+        <div class="sidebar-header-btns">
+          <button id="btn-refs-panel-popout" class="panel-collapse-btn" title="팝아웃 (외부 창)" data-popout-panel="refs">↗</button>
+          <button id="btn-refs-panel-dock" class="panel-collapse-btn" title="사이드바로 복귀">⇲</button>
+        </div>
+      </div>
+      <div class="refs-panel-content" id="refs-panel-content"></div>
+    </div>
+
+    <!-- Terminal panel (avatar + terminal) -->
     <div id="bottom-area">
-      <!-- Avatar panel -->
       <div id="toki-avatar">
         <button id="btn-avatar-collapse" class="panel-collapse-btn avatar-collapse" title="아바타 접기">✕</button>
         <div id="toki-avatar-display">
-          <canvas id="toki-canvas"></canvas>
         </div>
         <div id="toki-status">
           <span id="toki-status-icon">💤</span>
@@ -139,11 +202,7 @@
         </div>
         <div id="toki-help-btn">❓ 도움말</div>
       </div>
-
-      <!-- Resizer between avatar and terminal (visible in right mode) -->
       <div id="avatar-resizer" class="resizer resizer-h" style="display:none;"></div>
-
-      <!-- TokiTalk terminal -->
       <div id="terminal-area">
         <div id="terminal-header">
           <div class="momo-header-left">
@@ -161,6 +220,9 @@
         <div id="terminal-container"></div>
       </div>
     </div>
+
+    <!-- Sidebar expand strip -->
+    <div id="sidebar-expand" title="사이드바 열기" style="display:none;">▶</div>
   </div>
 
   <!-- Status bar (auto-hide) -->
@@ -168,6 +230,8 @@
     <span id="status-text"></span>
   </div>
 
+  <script src="../../node_modules/wasmoon/dist/index.js"></script>
+  <script src="preview-engine.js"></script>
   <script src="app.js"></script>
 </body>
 </html>

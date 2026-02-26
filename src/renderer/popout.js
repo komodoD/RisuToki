@@ -9,6 +9,10 @@ if (panelType === 'terminal') {
   buildSidebarPopout();
 } else if (panelType === 'editor') {
   buildEditorPopout();
+} else if (panelType === 'preview') {
+  buildPreviewPopout();
+} else if (panelType === 'refs') {
+  buildRefsPopout();
 }
 
 // ==================== Terminal Popout (full TokiTalk UI) ====================
@@ -226,23 +230,29 @@ function updatePopoutRpStyle(btn, active) {
 const IDLE_IMG = '../../assets/icon.png';
 const DANCING_IMG = '../../assets/toki_dancing.gif';
 
+let _popoutIsActive = false;
+let _poImg, _poStatus, _poIcon, _poText;
 function setPopoutActive(active) {
-  const img = document.getElementById('popout-avatar-img');
-  const status = document.getElementById('popout-status');
-  const icon = document.getElementById('popout-status-icon');
-  const text = document.getElementById('popout-status-text');
-  if (!img || !status) return;
+  if (_popoutIsActive === active) return;
+  if (!_poImg) {
+    _poImg = document.getElementById('popout-avatar-img');
+    _poStatus = document.getElementById('popout-status');
+    _poIcon = document.getElementById('popout-status-icon');
+    _poText = document.getElementById('popout-status-text');
+  }
+  if (!_poImg || !_poStatus) return;
+  _popoutIsActive = active;
 
   if (active) {
-    img.src = DANCING_IMG;
-    status.classList.add('working');
-    icon.textContent = '✨';
-    text.textContent = '작업중~';
+    _poImg.src = DANCING_IMG;
+    _poStatus.classList.add('working');
+    _poIcon.textContent = '✨';
+    _poText.textContent = '작업중~';
   } else {
-    img.src = IDLE_IMG;
-    status.classList.remove('working');
-    icon.textContent = '💤';
-    text.textContent = '대기중~';
+    _poImg.src = IDLE_IMG;
+    _poStatus.classList.remove('working');
+    _poIcon.textContent = '💤';
+    _poText.textContent = '대기중~';
   }
 }
 
@@ -542,6 +552,106 @@ async function buildSidebarPopout() {
   }
 }
 
+// ==================== Refs Popout ====================
+
+async function buildRefsPopout() {
+  // Header (blue gradient, draggable)
+  const header = document.createElement('div');
+  header.id = 'popout-sidebar-header';
+  header.innerHTML = `
+    <div style="display:flex;align-items:center;gap:8px;">
+      <span style="font-size:18px;">📄</span>
+      <span style="font-size:15px;font-weight:700;">참고자료</span>
+    </div>
+    <div class="sidebar-header-btns">
+      <button id="btn-popout-dock" title="도킹 (복원)">📌</button>
+      <button class="btn-close-popout" title="닫기">✕</button>
+    </div>
+  `;
+  root.appendChild(header);
+
+  header.querySelector('#btn-popout-dock').addEventListener('click', () => window.popoutAPI.dock());
+  header.querySelector('.btn-close-popout').addEventListener('click', () => window.close());
+
+  // Content area
+  const content = document.createElement('div');
+  content.id = 'popout-sidebar-content';
+  root.appendChild(content);
+
+  // Load data
+  const data = await window.popoutAPI.getRefsData();
+  if (!data) {
+    content.innerHTML = '<div style="padding:16px;color:var(--text-secondary);font-size:13px;">데이터를 불러올 수 없습니다</div>';
+    return;
+  }
+
+  // Guides folder
+  if (data.guides && data.guides.length > 0) {
+    const guideHeader = document.createElement('div');
+    guideHeader.className = 'tree-item';
+    guideHeader.style.cssText = 'color:var(--accent);font-weight:700;font-size:11px;letter-spacing:0.5px;padding:10px 8px 4px;cursor:default;text-transform:uppercase;';
+    guideHeader.innerHTML = '<span class="icon">📖</span><span>가이드</span>';
+    content.appendChild(guideHeader);
+
+    for (const fileName of data.guides) {
+      const el = document.createElement('div');
+      el.className = 'tree-item indent-1';
+      el.style.cursor = 'pointer';
+      el.innerHTML = `<span class="icon">·</span><span>${fileName}</span>`;
+      el.addEventListener('click', () => {
+        window.popoutAPI.refsItemClick(`guide_${fileName}`);
+        content.querySelectorAll('.tree-item').forEach(x => x.classList.remove('active'));
+        el.classList.add('active');
+      });
+      content.appendChild(el);
+    }
+  }
+
+  // Reference files tree
+  if (data.refs && data.refs.length > 0) {
+    const refSep = document.createElement('div');
+    refSep.className = 'tree-item';
+    refSep.style.cssText = 'color:var(--accent);font-weight:700;font-size:11px;letter-spacing:0.5px;padding:10px 8px 4px;cursor:default;text-transform:uppercase;border-top:1px solid var(--border-color);margin-top:8px;';
+    refSep.textContent = '── 참고 파일 ──';
+    content.appendChild(refSep);
+
+    for (const item of data.refs) {
+      const el = document.createElement('div');
+      el.className = `tree-item${item.indent ? ' indent-' + item.indent : ''}`;
+
+      if (item.isHeader) {
+        el.style.cssText = 'color:var(--accent);font-weight:700;font-size:11px;letter-spacing:0.5px;padding:10px 8px 4px;cursor:default;text-transform:uppercase;';
+      }
+
+      if (item.icon) {
+        const icon = document.createElement('span');
+        icon.className = 'icon';
+        icon.textContent = item.icon;
+        el.appendChild(icon);
+      }
+
+      const label = document.createElement('span');
+      label.textContent = item.label;
+      el.appendChild(label);
+
+      if (item.id) {
+        el.style.cursor = 'pointer';
+        el.addEventListener('click', () => {
+          window.popoutAPI.refsItemClick(item.id);
+          content.querySelectorAll('.tree-item').forEach(x => x.classList.remove('active'));
+          el.classList.add('active');
+        });
+      }
+
+      content.appendChild(el);
+    }
+  }
+
+  if ((!data.guides || data.guides.length === 0) && (!data.refs || data.refs.length === 0)) {
+    content.innerHTML = '<div style="padding:16px;color:var(--text-secondary);font-size:13px;">참고자료가 없습니다</div>';
+  }
+}
+
 // ==================== Editor Popout ====================
 
 async function buildEditorPopout() {
@@ -646,6 +756,427 @@ async function buildEditorPopout() {
     });
   };
   document.head.appendChild(loaderScript);
+}
+
+// ==================== Preview Popout ====================
+
+async function buildPreviewPopout() {
+  const charData = await window.popoutAPI.getPreviewData();
+  if (!charData) {
+    root.innerHTML = '<div style="padding:24px;color:#888;">프리뷰 데이터를 불러올 수 없습니다</div>';
+    return;
+  }
+
+  // Load PreviewEngine
+  await loadScript('preview-engine.js');
+
+  PreviewEngine.resetVars();
+  PreviewEngine.setCharName(charData.name || 'Character');
+  PreviewEngine.setUserName('User');
+  PreviewEngine.setDefaultVars(charData.defaultVariables || '');
+  PreviewEngine.setCharDescription(charData.description || '');
+  PreviewEngine.setCharFirstMessage(charData.firstMessage || '');
+  PreviewEngine.setLorebook(charData.lorebook || []);
+
+  let previewMessages = [];
+  let msgIndex = 0;
+  let luaInitialized = false;
+  let _reloadQueued = false;
+
+  PreviewEngine.onReloadDisplay(() => { _reloadQueued = true; });
+
+  // ── Markdown ──
+  function simpleMarkdown(text) {
+    if (!text) return '';
+    const htmlTags = [];
+    text = text.replace(/<[^>]+>/g, (m) => { htmlTags.push(m); return `\x00HTAG${htmlTags.length - 1}\x00`; });
+    text = text.replace(/\*\*(.+?)\*\*/g, '<strong>$1</strong>');
+    text = text.replace(/__(.+?)__/g, '<strong>$1</strong>');
+    text = text.replace(/(?<!\*)\*(?!\*)(.+?)(?<!\*)\*(?!\*)/g, '<em>$1</em>');
+    text = text.replace(/(?<!_)_(?!_)(.+?)(?<!_)_(?!_)/g, '<em>$1</em>');
+    text = text.replace(/\u201C([^\u201D]+)\u201D/g, '<span style="color:var(--FontColorQuote2)">\u201C$1\u201D</span>');
+    text = text.replace(/(?:^|(?<=[\s\n(]))\"([^"]+?)\"(?=[\s\n).,!?;:]|$)/gm, '<span style="color:var(--FontColorQuote2)">\u201C$1\u201D</span>');
+    text = text.replace(/`([^`]+)`/g, '<code>$1</code>');
+    text = text.replace(/\n/g, '<br>');
+    text = text.replace(/\x00HTAG(\d+)\x00/g, (_, i) => htmlTags[parseInt(i)]);
+    return text;
+  }
+
+  function escapeHtml(str) { return str.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;'); }
+
+  function buildChatDoc() {
+    const processedCSS = PreviewEngine.risuChatParser(charData.css || '', { runVar: true });
+    return `<!DOCTYPE html><html><head><meta charset="UTF-8">
+<meta http-equiv="Content-Security-Policy" content="default-src * 'unsafe-inline' 'unsafe-eval'; img-src * data: blob:; style-src * 'unsafe-inline'; font-src * data: blob:; media-src * data: blob:; connect-src * data: blob:;">
+<style>
+:root { --FontColorStandard:#fafafa; --FontColorBold:#e5e5e5; --FontColorItalic:#8c8d93; --FontColorItalicBold:#8c8d93; --FontColorQuote1:#8BE9FD; --FontColorQuote2:#FFB86C; --risu-theme-bgcolor:#282a36; --risu-theme-darkbg:#21222c; --risu-theme-textcolor:#f5f5f5; --risu-theme-textcolor2:#64748b; --risu-theme-borderc:#6272a4; --risu-theme-selected:#44475a; --risu-theme-draculared:#ff5555; --risu-theme-darkborderc:#4b5563; --risu-theme-darkbutton:#374151; --risu-font-family:Arial,sans-serif,serif; }
+* { box-sizing:border-box;margin:0;padding:0; }
+body { background:var(--risu-theme-bgcolor);color:var(--risu-theme-textcolor);font-family:var(--risu-font-family);min-height:100vh;overflow-x:hidden;overflow-y:auto; }
+.background-dom { position:fixed;top:0;left:0;width:100%;height:100%;pointer-events:none;z-index:10; }
+.background-dom * { pointer-events:auto; }
+.default-chat-screen { position:relative;z-index:1;display:flex;flex-direction:column;min-height:100vh;padding:8px 0 80px; }
+.risu-chat { display:flex;width:100%;max-width:100%;justify-content:center;box-sizing:border-box; }
+.risu-chat-inner { display:flex;color:var(--risu-theme-textcolor);margin:4px 16px;padding:8px;flex-grow:1;align-items:flex-start;max-width:100%;width:100%;box-sizing:border-box; }
+.chat-avatar { width:45px;height:45px;min-width:45px;border-radius:6px;background-color:var(--risu-theme-selected);background-size:cover;background-position:center;box-shadow:0 2px 8px rgba(0,0,0,0.3);flex-shrink:0; }
+.chat-content { display:flex;flex-direction:column;margin-left:16px;flex:1;min-width:0;overflow:hidden; }
+.chat-name { font-size:1rem;font-weight:600;color:var(--risu-theme-textcolor);margin-bottom:4px; }
+.flexium { display:flex;flex-direction:row;justify-content:flex-start; }
+.chat-width { max-width:100%;word-break:normal;overflow-wrap:anywhere; }
+.chattext { font-size:1rem;line-height:1.75;color:var(--FontColorStandard); }
+.chattext p { color:var(--FontColorStandard);margin:0.25em 0; }
+.chattext em { color:var(--FontColorItalic);font-style:italic; }
+.chattext strong { color:var(--FontColorBold);font-weight:bold; }
+.chattext img { max-width:100%;height:auto;border-radius:4px;margin:4px 0; }
+.chattext code { background:rgba(255,255,255,0.1);padding:2px 6px;border-radius:3px;font-size:0.9em; }
+.chattext pre { background:rgba(0,0,0,0.3);padding:12px;border-radius:6px;overflow-x:auto;margin:8px 0; }
+.chattext pre code { background:none;padding:0; }
+.chattext blockquote { display:block;border-left:4px solid var(--FontColorQuote1);background:color-mix(in srgb,transparent 90%,var(--FontColorQuote1) 10%);padding:0.5rem 1rem;color:var(--FontColorQuote1);margin:4px 0; }
+.cbs-button { display:inline-block;padding:6px 16px;margin:4px 2px;background:var(--risu-theme-selected);color:var(--risu-theme-textcolor);border:1px solid var(--risu-theme-borderc);border-radius:6px;cursor:pointer;font-size:0.9em;transition:background 0.15s; }
+.cbs-button:hover { background:var(--risu-theme-borderc); }
+::-webkit-scrollbar{width:8px} ::-webkit-scrollbar-track{background:var(--risu-theme-darkbg)} ::-webkit-scrollbar-thumb{background:var(--risu-theme-selected);border-radius:4px} ::-webkit-scrollbar-thumb:hover{background:var(--risu-theme-borderc)}
+</style></head><body>
+<div class="background-dom" id="bg-dom">${processedCSS}</div>
+<div class="default-chat-screen" id="chat-container"></div>
+<script>
+function cbsClick(v,val){ window.parent.postMessage({type:'cbs-button',varName:v,value:val},'*'); }
+document.addEventListener('click',function(e){
+  var btn=e.target.closest('[risu-btn]');
+  if(btn){e.preventDefault();e.stopPropagation();window.parent.postMessage({type:'risu-btn',data:btn.getAttribute('risu-btn')},'*');return;}
+  var trig=e.target.closest('[risu-trigger]');
+  if(trig){e.preventDefault();e.stopPropagation();window.parent.postMessage({type:'risu-trigger',name:trig.getAttribute('risu-trigger')},'*');}
+});
+</script></body></html>`;
+  }
+
+  async function addMessage(role, rawContent) {
+    const doc = chatFrame.contentDocument;
+    if (!doc) return;
+    const container = doc.getElementById('chat-container');
+    if (!container) return;
+    const scripts = charData.regex || [];
+    let content = rawContent;
+    const cbsOpts = (runVar) => ({ runVar, chatID: msgIndex, messageCount: previewMessages.length + 1 });
+    if (role === 'char') {
+      content = PreviewEngine.processRegex(content, scripts, 'editoutput');
+      if (luaInitialized) content = await PreviewEngine.runLuaTrigger('editOutput', content);
+      content = PreviewEngine.risuChatParser(content, cbsOpts(true));
+      content = PreviewEngine.processRegex(content, scripts, 'editdisplay');
+      content = PreviewEngine.risuChatParser(content, cbsOpts(true));
+      if (luaInitialized) content = await PreviewEngine.runLuaTrigger('editDisplay', content);
+      content = PreviewEngine.risuChatParser(content, cbsOpts(false));
+    } else {
+      content = PreviewEngine.processRegex(content, scripts, 'editinput');
+      if (luaInitialized) content = await PreviewEngine.runLuaTrigger('editInput', content);
+      content = PreviewEngine.risuChatParser(content, cbsOpts(true));
+    }
+    content = simpleMarkdown(content);
+    content = PreviewEngine.resolveAssetImages(content);
+    const idx = msgIndex++;
+    const wrapper = doc.createElement('div');
+    wrapper.className = 'chat-message-container';
+    wrapper.setAttribute('x-hashed', String(idx));
+    const name = role === 'char' ? charData.name : 'User';
+    const avatarBg = role === 'char' ? 'var(--risu-theme-selected)' : 'var(--risu-theme-borderc)';
+    wrapper.innerHTML = `<div class="risu-chat" data-chat-index="${idx}"><div class="risu-chat-inner"><div class="chat-avatar" style="background-color:${avatarBg}"></div><span class="chat-content"><div class="flexium items-center chat-width"><div class="chat-width chat-name">${escapeHtml(name)}</div></div><span class="chattext chat-width prose">${content}</span></span></div></div>`;
+    container.appendChild(wrapper);
+    previewMessages.push({ role, content: rawContent });
+    doc.documentElement.scrollTop = doc.documentElement.scrollHeight;
+  }
+
+  function refreshBackground() {
+    const doc = chatFrame.contentDocument;
+    if (!doc) return;
+    const bgDom = doc.getElementById('bg-dom');
+    if (bgDom) {
+      let processed = PreviewEngine.risuChatParser(charData.css || '', { runVar: true });
+      const luaHTML = PreviewEngine.getLuaOutputHTML();
+      if (luaHTML) {
+        let parsedLuaHTML = PreviewEngine.risuChatParser(luaHTML, { runVar: true });
+        parsedLuaHTML = PreviewEngine.resolveAssetImages(parsedLuaHTML);
+        processed += parsedLuaHTML;
+      }
+      bgDom.innerHTML = processed;
+    }
+  }
+
+  async function handleSend() {
+    const text = chatInput.value.trim();
+    if (!text) return;
+    chatInput.value = '';
+    chatInput.style.height = 'auto';
+    await addMessage('user', text);
+    if (luaInitialized) { try { await PreviewEngine.runLuaTrigger('input', text); } catch (e) {} }
+    let response;
+    if (charData.firstMessage && previewMessages.length <= 2) { response = charData.firstMessage; }
+    else { response = `${charData.name}: "${text}"에 대한 응답입니다.`; }
+    if (luaInitialized) { try { await PreviewEngine.runLuaTrigger('output', response); } catch (e) {} }
+    await addMessage('char', response);
+    refreshBackground();
+  }
+
+  async function reRenderMessages() {
+    const doc = chatFrame.contentDocument;
+    if (!doc) return;
+    const container = doc.getElementById('chat-container');
+    if (!container) return;
+    container.innerHTML = '';
+    const saved = [...previewMessages];
+    previewMessages = [];
+    msgIndex = 0;
+    for (const msg of saved) await addMessage(msg.role, msg.content);
+    refreshBackground();
+  }
+
+  function onMessage(e) {
+    if (!e.data) return;
+    if (e.data.type === 'cbs-button') {
+      PreviewEngine.setChatVar(e.data.varName, e.data.value);
+      reRenderMessages();
+    } else if (e.data.type === 'risu-btn') {
+      (async () => {
+        _reloadQueued = false;
+        if (luaInitialized) { try { await PreviewEngine.runLuaTrigger('manual', null); } catch (e) {} }
+        await reRenderMessages();
+        _reloadQueued = false;
+      })();
+    } else if (e.data.type === 'risu-trigger') {
+      (async () => {
+        _reloadQueued = false;
+        if (luaInitialized) { try { await PreviewEngine.runLuaTriggerByName(e.data.name); } catch (e) {} }
+        await reRenderMessages();
+        _reloadQueued = false;
+      })();
+    }
+  }
+  window.addEventListener('message', onMessage);
+
+  // ── Build UI ──
+  const header = document.createElement('div');
+  header.style.cssText = 'display:flex;align-items:center;justify-content:space-between;padding:8px 14px;background:#21222c;color:#f5f5f5;font-weight:600;font-size:13px;flex-shrink:0;border-bottom:1px solid #44475a;-webkit-app-region:drag;';
+  const headerLeft = document.createElement('span');
+  headerLeft.textContent = `${charData.name} — 프리뷰`;
+  headerLeft.style.cssText = '-webkit-app-region:drag;';
+  const headerBtns = document.createElement('div');
+  headerBtns.style.cssText = 'display:flex;gap:4px;align-items:center;-webkit-app-region:no-drag;';
+
+  const resetBtn = document.createElement('button');
+  resetBtn.textContent = '↻';
+  resetBtn.title = '초기화';
+  resetBtn.style.cssText = 'background:rgba(255,255,255,0.1);border:none;color:#f5f5f5;font-size:14px;cursor:pointer;border-radius:4px;width:28px;height:28px;display:flex;align-items:center;justify-content:center;';
+  resetBtn.addEventListener('click', async () => {
+    PreviewEngine.resetVars();
+    PreviewEngine.setDefaultVars(charData.defaultVariables);
+    PreviewEngine.setCharDescription(charData.description);
+    PreviewEngine.setCharFirstMessage(charData.firstMessage);
+    previewMessages = [];
+    msgIndex = 0;
+    const doc = chatFrame.contentDocument;
+    if (doc) {
+      doc.open(); doc.write(buildChatDoc()); doc.close();
+      if (charData.lua) {
+        luaInitialized = await PreviewEngine.initLua(charData.lua);
+        if (luaInitialized) { try { await PreviewEngine.runLuaTrigger('start', null); } catch(e) {} }
+      }
+      if (charData.firstMessage) await addMessage('char', charData.firstMessage);
+      refreshBackground();
+    }
+  });
+
+  // Debug toggle button
+  const debugBtn = document.createElement('button');
+  debugBtn.textContent = '🔧';
+  debugBtn.title = '디버그 패널';
+  debugBtn.style.cssText = resetBtn.style.cssText;
+  let debugOpen = false;
+
+  const dockBtn = document.createElement('button');
+  dockBtn.textContent = '📌';
+  dockBtn.title = '메인 창으로 도킹';
+  dockBtn.style.cssText = resetBtn.style.cssText;
+  dockBtn.addEventListener('click', () => window.popoutAPI.dock());
+
+  const closeBtn = document.createElement('button');
+  closeBtn.textContent = '✕';
+  closeBtn.title = '닫기';
+  closeBtn.style.cssText = resetBtn.style.cssText;
+  closeBtn.addEventListener('click', () => window.close());
+
+  headerBtns.appendChild(resetBtn);
+  headerBtns.appendChild(debugBtn);
+  headerBtns.appendChild(dockBtn);
+  headerBtns.appendChild(closeBtn);
+  header.appendChild(headerLeft);
+  header.appendChild(headerBtns);
+
+  const chatFrame = document.createElement('iframe');
+  chatFrame.style.cssText = 'flex:1;width:100%;border:none;background:#282a36;min-height:0;';
+
+  const inputBar = document.createElement('div');
+  inputBar.style.cssText = 'display:flex;gap:6px;padding:8px 12px;background:#21222c;border-top:1px solid #44475a;flex-shrink:0;align-items:flex-end;';
+  const chatInput = document.createElement('textarea');
+  chatInput.placeholder = '메시지를 입력하세요...';
+  chatInput.rows = 1;
+  chatInput.style.cssText = 'flex:1;padding:8px 12px;border:1px solid #44475a;border-radius:8px;background:#282a36;color:#f5f5f5;font-size:13px;resize:none;outline:none;max-height:120px;font-family:inherit;';
+  chatInput.addEventListener('keydown', (e) => { if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); handleSend(); } });
+  chatInput.addEventListener('input', () => { chatInput.style.height = 'auto'; chatInput.style.height = Math.min(chatInput.scrollHeight, 120) + 'px'; });
+  const sendBtn = document.createElement('button');
+  sendBtn.textContent = '전송';
+  sendBtn.style.cssText = 'padding:8px 16px;background:#4a90d9;color:#fff;border:none;border-radius:8px;font-weight:600;cursor:pointer;font-size:13px;white-space:nowrap;';
+  sendBtn.addEventListener('click', handleSend);
+  inputBar.appendChild(chatInput);
+  inputBar.appendChild(sendBtn);
+
+  // ── Debug drawer ──
+  function escapeHtmlDbg(str) { return String(str).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;'); }
+
+  const debugDrawer = document.createElement('div');
+  debugDrawer.style.cssText = 'border-top:1px solid #44475a;background:#1c2340;height:220px;display:none;flex-direction:column;flex-shrink:0;overflow:hidden;';
+
+  const debugTabs = document.createElement('div');
+  debugTabs.style.cssText = 'display:flex;gap:2px;padding:4px 8px;background:#161b33;border-bottom:1px solid #44475a;flex-shrink:0;align-items:center;';
+  let activeDebugTab = 'variables';
+  const tabDefs = [
+    { id: 'variables', label: '변수' },
+    { id: 'lorebook', label: '로어북' },
+    { id: 'lua', label: 'Lua' },
+    { id: 'regex', label: '정규식' },
+  ];
+  const tabBtnStyle = 'padding:3px 10px;border:none;border-radius:4px;font-size:11px;cursor:pointer;color:#aaa;background:transparent;';
+  const tabBtnActiveStyle = 'padding:3px 10px;border:none;border-radius:4px;font-size:11px;cursor:pointer;color:#fff;background:#44475a;';
+  for (const td of tabDefs) {
+    const tab = document.createElement('button');
+    tab.style.cssText = td.id === activeDebugTab ? tabBtnActiveStyle : tabBtnStyle;
+    tab.textContent = td.label;
+    tab.addEventListener('click', () => {
+      activeDebugTab = td.id;
+      debugTabs.querySelectorAll('button').forEach(t => { if (t.dataset.debugTab) t.style.cssText = tabBtnStyle; });
+      tab.style.cssText = tabBtnActiveStyle;
+      updateDebugContent();
+    });
+    tab.dataset.debugTab = td.id;
+    debugTabs.appendChild(tab);
+  }
+
+  const debugContentEl = document.createElement('div');
+  debugContentEl.style.cssText = 'flex:1;overflow-y:auto;padding:6px 10px;font-size:11px;color:#ccc;';
+  debugDrawer.appendChild(debugTabs);
+  debugDrawer.appendChild(debugContentEl);
+
+  function updateDebugContent() {
+    debugContentEl.innerHTML = '';
+    const vars = PreviewEngine.getVariables();
+    const lore = charData.lorebook || [];
+    const scripts = charData.regex || [];
+    const tblStyle = 'width:100%;border-collapse:collapse;font-size:11px;';
+    const thStyle = 'text-align:left;padding:3px 6px;border-bottom:1px solid #44475a;color:#8be9fd;font-weight:600;';
+    const tdStyle = 'padding:3px 6px;border-bottom:1px solid #2a2e4a;';
+
+    if (activeDebugTab === 'variables') {
+      const keys = Object.keys(vars);
+      if (!keys.length) { debugContentEl.innerHTML = '<div style="color:#666;padding:8px;">변수 없음</div>'; return; }
+      let html = `<table style="${tblStyle}"><tr><th style="${thStyle}">이름</th><th style="${thStyle}">값</th></tr>`;
+      for (const k of keys) html += `<tr><td style="${tdStyle}">${escapeHtmlDbg(k)}</td><td style="${tdStyle}">${escapeHtmlDbg(String(vars[k]))}</td></tr>`;
+      html += '</table>';
+      debugContentEl.innerHTML = html;
+    } else if (activeDebugTab === 'lorebook') {
+      if (!lore.length) { debugContentEl.innerHTML = '<div style="color:#666;padding:8px;">로어북 없음</div>'; return; }
+      const matches = previewMessages.length > 0 ? PreviewEngine.matchLorebook(previewMessages, lore) : [];
+      const matchSet = new Set(matches.map(m => m.index));
+      let html = `<table style="${tblStyle}"><tr><th style="${thStyle}">#</th><th style="${thStyle}">이름</th><th style="${thStyle}">키</th><th style="${thStyle}">상태</th></tr>`;
+      for (let i = 0; i < lore.length; i++) {
+        const e = lore[i]; if (e.mode === 'folder') continue;
+        const active = matchSet.has(i);
+        const match = matches.find(m => m.index === i);
+        const bg = active ? 'background:rgba(76,175,80,0.1);' : '';
+        html += `<tr style="${bg}"><td style="${tdStyle}">${i}</td><td style="${tdStyle}">${escapeHtmlDbg(e.comment||'')}</td><td style="${tdStyle}">${escapeHtmlDbg(e.key||'')}</td><td style="${tdStyle}">${
+          e.alwaysActive ? '🟢 항상' : active ? '🟢 '+escapeHtmlDbg(match.reason) : e.key ? '⚫' : '⬜'
+        }</td></tr>`;
+      }
+      html += '</table>';
+      debugContentEl.innerHTML = html;
+    } else if (activeDebugTab === 'lua') {
+      const output = PreviewEngine.getLuaOutput();
+      let html = '';
+      if (!luaInitialized) {
+        html += '<button id="popout-lua-init" style="margin-bottom:6px;padding:4px 12px;background:#4a90d9;color:#fff;border:none;border-radius:4px;cursor:pointer;font-size:11px;">Lua 초기화</button>';
+      } else {
+        html += '<div style="color:#4caf50;font-size:11px;margin-bottom:4px;">✅ Lua 활성</div>';
+      }
+      html += `<pre style="background:#161b33;padding:8px;border-radius:4px;overflow-x:auto;font-size:11px;min-height:50px;margin:0;">${output.length ? escapeHtmlDbg(output.join('\n')) : '(출력 없음)'}</pre>`;
+      debugContentEl.innerHTML = html;
+      if (!luaInitialized) {
+        const btn = debugContentEl.querySelector('#popout-lua-init');
+        if (btn) btn.addEventListener('click', async () => {
+          btn.textContent = '초기화 중...'; btn.disabled = true;
+          luaInitialized = await PreviewEngine.initLua(charData.lua);
+          updateDebugContent();
+        });
+      }
+    } else if (activeDebugTab === 'regex') {
+      if (!scripts.length) { debugContentEl.innerHTML = '<div style="color:#666;padding:8px;">정규식 없음</div>'; return; }
+      const types = ['editinput','editoutput','editdisplay','editrequest'];
+      let html = '';
+      for (const type of types) {
+        const filtered = scripts.filter(s => s.type === type && s.ableFlag !== false);
+        if (!filtered.length) continue;
+        html += `<div style="font-weight:600;color:#4a90d9;margin:4px 0 2px;font-size:11px;">${type} (${filtered.length})</div>`;
+        html += `<table style="${tblStyle}"><tr><th style="${thStyle}">이름</th><th style="${thStyle}">찾기</th><th style="${thStyle}">바꾸기</th></tr>`;
+        for (const s of filtered) {
+          html += `<tr><td style="${tdStyle}">${escapeHtmlDbg(s.comment||'')}</td><td style="${tdStyle}"><code>${escapeHtmlDbg(s.find||s.in||'')}</code></td><td style="${tdStyle}"><code>${escapeHtmlDbg((s.replace||s.out||'').substring(0,50))}</code></td></tr>`;
+        }
+        html += '</table>';
+      }
+      debugContentEl.innerHTML = html;
+    }
+  }
+
+  debugBtn.addEventListener('click', () => {
+    debugOpen = !debugOpen;
+    debugDrawer.style.display = debugOpen ? 'flex' : 'none';
+    if (debugOpen) updateDebugContent();
+  });
+
+  // ── Debug resizer ──
+  const debugResizer = document.createElement('div');
+  debugResizer.style.cssText = 'height:4px;background:#44475a;cursor:ns-resize;flex-shrink:0;display:none;';
+  debugResizer.addEventListener('mousedown', (e) => {
+    e.preventDefault();
+    const startY = e.clientY;
+    const startH = debugDrawer.getBoundingClientRect().height;
+    const onMove = (ev) => {
+      const delta = startY - ev.clientY;
+      debugDrawer.style.height = Math.max(80, startH + delta) + 'px';
+    };
+    const onUp = () => { document.removeEventListener('mousemove', onMove); document.removeEventListener('mouseup', onUp); };
+    document.addEventListener('mousemove', onMove);
+    document.addEventListener('mouseup', onUp);
+  });
+
+  // Sync resizer visibility with debug
+  const origDebugClick = debugBtn.onclick;
+  debugBtn.addEventListener('click', () => {
+    debugResizer.style.display = debugOpen ? '' : 'none';
+  });
+
+  root.style.cssText = 'display:flex;flex-direction:column;height:100%;background:#282a36;';
+  root.appendChild(header);
+  root.appendChild(chatFrame);
+  root.appendChild(inputBar);
+  root.appendChild(debugResizer);
+  root.appendChild(debugDrawer);
+
+  // Initialize iframe
+  requestAnimationFrame(async () => {
+    const doc = chatFrame.contentDocument || chatFrame.contentWindow.document;
+    doc.open(); doc.write(buildChatDoc()); doc.close();
+    if (charData.lua) {
+      luaInitialized = await PreviewEngine.initLua(charData.lua);
+      if (luaInitialized) { try { await PreviewEngine.runLuaTrigger('start', null); } catch(e) {} refreshBackground(); }
+    }
+    if (charData.firstMessage) {
+      setTimeout(async () => { await addMessage('char', charData.firstMessage); refreshBackground(); }, 50);
+    }
+  });
 }
 
 // ==================== Shared Helpers ====================

@@ -45,8 +45,14 @@ const TOOLS = [
   },
   {
     name: 'list_lorebook',
-    description: '로어북 항목 목록을 확인합니다 (인덱스, 코멘트, 키, 활성화 상태).',
-    inputSchema: { type: 'object', properties: {}, required: [] }
+    description: '로어북 항목 목록을 확인합니다 (인덱스, 코멘트, 키, 활성화 상태). filter로 comment/key 검색 가능.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        filter: { type: 'string', description: '검색 키워드 (comment, key에서 검색). 생략 시 전체 목록 반환' }
+      },
+      required: []
+    }
   },
   {
     name: 'read_lorebook',
@@ -322,7 +328,7 @@ async function handleToolCall(name, args) {
       return await apiRequest('POST', `/field/${encodeURIComponent(args.field)}`, { content: args.content });
 
     case 'list_lorebook':
-      return await apiRequest('GET', '/lorebook');
+      return await apiRequest('GET', args.filter ? `/lorebook?filter=${encodeURIComponent(args.filter)}` : '/lorebook');
 
     case 'read_lorebook':
       return await apiRequest('GET', `/lorebook/${args.index}`);

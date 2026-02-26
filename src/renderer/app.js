@@ -51,6 +51,7 @@ let autosaveInterval = parseInt(localStorage.getItem('toki-autosave-interval'), 
 let autosaveDir = localStorage.getItem('toki-autosave-dir') || ''; // empty = same as file
 let autosaveTimer = null;
 
+
 // Chat mode state
 let chatMode = false;
 let chatMessages = [];
@@ -68,14 +69,67 @@ const BG_BUFFER_MAX = 8000; // max chars to keep
 // Snapshot of last completed response (survives finalizeChatResponse clearing)
 let lastResponseSnapshot = '';
 
-// Layout state for panel management
-const layoutState = {
-  sidebarPos: 'left',      // 'left' | 'right'
-  terminalPos: 'bottom',   // 'bottom' | 'right'
-  sidebarVisible: true,
-  terminalVisible: true,
-  avatarVisible: true
+// Layout state for panel management (slot-based)
+// Positions: 'left' | 'right' | 'far-left' | 'far-right' | 'top' | 'bottom'
+const SLOT_IDS = ['far-left', 'left', 'right', 'far-right', 'top', 'bottom'];
+const V_SLOTS = new Set(['far-left', 'left', 'right', 'far-right']);
+const H_SLOTS = new Set(['top', 'bottom']);
+const DEFAULT_SLOT_SIZES = { 'far-left': 260, 'left': 260, 'right': 260, 'far-right': 350, 'top': 250, 'bottom': 250 };
+
+// Xterm terminal theme constants (shared by initTerminal + applyDarkMode)
+const TERM_THEME_DARK = {
+  background: '#141a31', foreground: '#d8dce8', cursor: '#4a90d9', cursorAccent: '#141a31',
+  selectionBackground: '#4a90d944', selectionForeground: '#f0f2f8',
+  black: '#2e3a56', red: '#ef5350', green: '#66bb6a', yellow: '#ffca28',
+  blue: '#4a90d9', magenta: '#ba68c8', cyan: '#4dd0e1', white: '#d8dce8',
+  brightBlack: '#7a8ba5', brightRed: '#fc96ab', brightGreen: '#81c784', brightYellow: '#ffb342',
+  brightBlue: '#6fb3f2', brightMagenta: '#ce93d8', brightCyan: '#80deea', brightWhite: '#f0f2f8'
 };
+const TERM_THEME_LIGHT = {
+  background: '#ffffff', foreground: '#2a323e', cursor: '#4a8ac6', cursorAccent: '#ffffff',
+  selectionBackground: '#b3d4fc', selectionForeground: '#1a2740',
+  black: '#4b5a6f', red: '#e53935', green: '#2e7d32', yellow: '#e65100',
+  blue: '#3493f9', magenta: '#8e24aa', cyan: '#00838f', white: '#87929e',
+  brightBlack: '#68788f', brightRed: '#fc96ab', brightGreen: '#66bb6a', brightYellow: '#ffb342',
+  brightBlue: '#4a8ac6', brightMagenta: '#ba68c8', brightCyan: '#4dd0e1', brightWhite: '#ffffff'
+};
+
+// Form tab types that use special editors (not Monaco)
+const FORM_TAB_TYPES = new Set(['_image', '_loreform', '_regexform']);
+
+const layoutState = {
+  itemsPos: 'left',         // where the items (sidebar) panel goes
+  refsPos: 'sidebar',       // 'sidebar' = combined with items, or any slot position
+  terminalPos: 'bottom',    // where the terminal panel goes
+  itemsVisible: true,
+  terminalVisible: true,
+  avatarVisible: true,
+  slotSizes: { ...DEFAULT_SLOT_SIZES },
+};
+
+// Restore saved layout from localStorage (with migration from old format)
+(function restoreLayout() {
+  try {
+    const saved = JSON.parse(localStorage.getItem('toki-layout-state'));
+    if (saved) {
+      // Migrate from old format
+      if (saved.sidebarPos && !saved.itemsPos) saved.itemsPos = saved.sidebarPos;
+      if (saved.sidebarVisible !== undefined && saved.itemsVisible === undefined) saved.itemsVisible = saved.sidebarVisible;
+
+      if (saved.itemsPos) layoutState.itemsPos = saved.itemsPos;
+      if (saved.refsPos && saved.refsPos !== '_popout') layoutState.refsPos = saved.refsPos;
+      if (saved.terminalPos) layoutState.terminalPos = saved.terminalPos;
+      if (saved.itemsVisible !== undefined) layoutState.itemsVisible = saved.itemsVisible;
+      if (saved.terminalVisible !== undefined) layoutState.terminalVisible = saved.terminalVisible;
+      if (saved.avatarVisible !== undefined) layoutState.avatarVisible = saved.avatarVisible;
+      if (saved.slotSizes) Object.assign(layoutState.slotSizes, saved.slotSizes);
+    }
+  } catch (e) {}
+})();
+
+function saveLayout() {
+  try { localStorage.setItem('toki-layout-state', JSON.stringify(layoutState)); } catch (e) {}
+}
 
 // ==================== Custom Confirm (MomoTalk style) ====================
 let confirmAllowAll = false; // "전부 허용" toggle for current batch
@@ -328,7 +382,6 @@ function createOrSwitchEditor(tabInfo) {
   if (!monacoReady) return;
 
   // Special tab types: image, lorebook form, regex form
-  const specialTypes = ['_image', '_loreform', '_regexform'];
 
   if (tabInfo.language === '_image') {
     disposeFormEditors();
@@ -358,7 +411,7 @@ function createOrSwitchEditor(tabInfo) {
   // Save current editor content before switching + backup if dirty
   if (editorInstance && activeTabId) {
     const curTab = openTabs.find(t => t.id === activeTabId);
-    if (curTab && !specialTypes.includes(curTab.language) && curTab.setValue) {
+    if (curTab && !FORM_TAB_TYPES.has(curTab.language) && curTab.setValue) {
       curTab._lastValue = editorInstance.getValue();
       curTab.setValue(curTab._lastValue);
       if (dirtyFields.has(curTab.id)) {
@@ -643,8 +696,12 @@ function buildSidebar() {
     luaFolder.children.appendChild(sectionEl);
   }
 
-  // ---- CSS folder (section-based, like Lua) ----
+  // ---- File type check ----
+  const isRisum = fileData._fileType === 'risum';
+
+  // ---- CSS folder (section-based, like Lua) — charx only ----
   cssSections = parseCssSections(fileData.css);
+  if (!isRisum) {
   const cssFolder = createFolderItem('CSS', '🎨', 0);
   tree.appendChild(cssFolder.header);
   tree.appendChild(cssFolder.children);
@@ -713,14 +770,16 @@ function buildSidebar() {
     });
     cssFolder.children.appendChild(sectionEl);
   }
+  } // end if (!isRisum) — CSS folder
 
   // ---- Single items ----
+  const charxOnlyFields = ['globalNote', 'firstMessage', 'defaultVariables'];
   const singles = [
     { id: 'globalNote', label: '글로벌노트', icon: '📝', lang: 'plaintext', field: 'globalNote' },
     { id: 'firstMessage', label: '첫 메시지', icon: '💬', lang: 'html', field: 'firstMessage' },
     { id: 'defaultVariables', label: '기본변수', icon: '⚙', lang: 'plaintext', field: 'defaultVariables' },
     { id: 'description', label: '설명', icon: '📄', lang: 'plaintext', field: 'description' },
-  ];
+  ].filter(item => !isRisum || !charxOnlyFields.includes(item.id));
 
   for (const item of singles) {
     const el = createTreeItem(item.label, item.icon, 0);
@@ -983,8 +1042,8 @@ async function buildRefsSidebar() {
         showContextMenu(e.clientX, e.clientY, [
           { label: '이름 복사', action: () => { navigator.clipboard.writeText(fileName); setStatus(`복사됨: ${fileName}`); } },
           { label: '경로 복사', action: async () => {
-            const cwd = await window.tokiAPI.getCwd();
-            const fullPath = `guides/${fileName}`;
+            const guidesDir = await window.tokiAPI.getGuidesPath();
+            const fullPath = guidesDir ? `${guidesDir.replace(/\\/g, '/')}/${fileName}` : `guides/${fileName}`;
             navigator.clipboard.writeText(fullPath);
             setStatus(`복사됨: ${fullPath}`);
           }},
@@ -1283,7 +1342,8 @@ function initSidebarSplitResizer() {
   const refsContent = document.getElementById('sidebar-refs');
   const collapseBtn = document.getElementById('btn-refs-collapse');
   const closeBtn = document.getElementById('btn-refs-close');
-  const popoutBtn = document.getElementById('btn-refs-popout');
+  const separateBtn = document.getElementById('btn-refs-separate');
+  const extPopoutBtn = document.getElementById('btn-refs-extpopout');
 
   if (collapseBtn && refsContent) {
     let refsCollapsed = false;
@@ -1301,10 +1361,35 @@ function initSidebarSplitResizer() {
       itemsSection.style.flex = '1';
     });
   }
-  if (popoutBtn) {
-    popoutBtn.addEventListener('click', () => {
-      // TODO: implement refs popout window if needed
-      setStatus('참고자료 팝아웃 (준비중)');
+  if (separateBtn) {
+    separateBtn.addEventListener('click', () => {
+      moveRefs('right');
+    });
+  }
+  if (extPopoutBtn) {
+    extPopoutBtn.addEventListener('click', () => {
+      if (isPanelPoppedOut('refs')) {
+        dockPanel('refs');
+      } else {
+        popOutPanel('refs');
+      }
+    });
+  }
+  // Right-click on refs header for position options
+  const refsHeader = document.querySelector('.sidebar-header-refs');
+  if (refsHeader) {
+    refsHeader.addEventListener('contextmenu', (e) => {
+      e.preventDefault();
+      e.stopPropagation();
+      showContextMenu(e.clientX, e.clientY, [
+        { label: '→ 사이드바', action: () => moveRefs('sidebar') },
+        { label: '→ 좌측', action: () => moveRefs('left') },
+        { label: '→ 우측', action: () => moveRefs('right') },
+        { label: '→ 좌끝', action: () => moveRefs('far-left') },
+        { label: '→ 우끝', action: () => moveRefs('far-right') },
+        { label: '→ 상단', action: () => moveRefs('top') },
+        { label: '→ 하단', action: () => moveRefs('bottom') },
+      ]);
     });
   }
 }
@@ -1386,20 +1471,12 @@ function createLoreEntryItem(child, indent) {
 }
 
 function updateSidebarActive() {
-  document.querySelectorAll('.tree-item').forEach(el => {
-    el.classList.remove('active');
+  const items = document.querySelectorAll('.tree-item');
+  const tab = activeTabId ? openTabs.find(t => t.id === activeTabId) : null;
+  const targetLabel = tab ? tab.label : null;
+  items.forEach(el => {
+    el.classList.toggle('active', targetLabel !== null && el.dataset.label === targetLabel);
   });
-  // Simple approach: highlight based on tab label
-  if (activeTabId) {
-    const tab = openTabs.find(t => t.id === activeTabId);
-    if (tab) {
-      document.querySelectorAll('.tree-item').forEach(el => {
-        if (el.dataset.label === tab.label) {
-          el.classList.add('active');
-        }
-      });
-    }
-  }
 }
 
 // ==================== Sidebar Actions ====================
@@ -1761,9 +1838,25 @@ function detectCssBlockClose(line) {
   return /^={6,}$/.test(before);
 }
 
+let _cssStylePrefix = '';
+let _cssStyleSuffix = '';
+
 function parseCssSections(cssCode) {
+  _cssStylePrefix = '';
+  _cssStyleSuffix = '';
   if (!cssCode || !cssCode.trim()) return [{ name: 'main', content: '' }];
-  const lines = cssCode.split('\n');
+
+  // Preserve <style> wrapper if present
+  let work = cssCode;
+  const openMatch = work.match(/^(\s*<style[^>]*>\s*\n?)/i);
+  const closeMatch = work.match(/(\n?\s*<\/style>\s*)$/i);
+  if (openMatch && closeMatch) {
+    _cssStylePrefix = openMatch[1];
+    _cssStyleSuffix = closeMatch[1];
+    work = work.slice(openMatch[1].length, work.length - closeMatch[1].length);
+  }
+
+  const lines = work.split('\n');
   const sections = [];
   let currentName = null;
   let currentLines = [];
@@ -1832,9 +1925,10 @@ let cssSections = [];
 
 function combineCssSections() {
   const eq = '============================================================';
-  return cssSections.map(s =>
+  const body = cssSections.map(s =>
     `/* ${eq}\n   ${s.name}\n   ${eq} */\n${s.content}`
   ).join('\n\n');
+  return _cssStylePrefix + body + _cssStyleSuffix;
 }
 
 async function addLuaSection() {
@@ -2147,8 +2241,8 @@ function initDragDrop() {
     for (const file of files) {
       const ext = file.name.split('.').pop().toLowerCase();
 
-      // .charx files → add as reference (works even without main file open)
-      if (ext === 'charx') {
+      // .charx/.risum files → add as reference (works even without main file open)
+      if (ext === 'charx' || ext === 'risum') {
         if (referenceFiles.some(r => r.fileName === file.name)) {
           setStatus(`이미 로드됨: ${file.name}`);
           continue;
@@ -2271,56 +2365,8 @@ async function initTerminal() {
   const container = document.getElementById('terminal-container');
   container.innerHTML = '';
 
-  const darkTermTheme = {
-    background: '#141a31',
-    foreground: '#d8dce8',
-    cursor: '#4a90d9',
-    cursorAccent: '#141a31',
-    selectionBackground: '#4a90d944',
-    selectionForeground: '#f0f2f8',
-    black: '#2e3a56',
-    red: '#ef5350',
-    green: '#66bb6a',
-    yellow: '#ffca28',
-    blue: '#4a90d9',
-    magenta: '#ba68c8',
-    cyan: '#4dd0e1',
-    white: '#d8dce8',
-    brightBlack: '#7a8ba5',
-    brightRed: '#fc96ab',
-    brightGreen: '#81c784',
-    brightYellow: '#ffb342',
-    brightBlue: '#6fb3f2',
-    brightMagenta: '#ce93d8',
-    brightCyan: '#80deea',
-    brightWhite: '#f0f2f8'
-  };
-  const lightTermTheme = {
-    background: '#ffffff',
-    foreground: '#2a323e',
-    cursor: '#4a8ac6',
-    cursorAccent: '#ffffff',
-    selectionBackground: '#b3d4fc',
-    selectionForeground: '#1a2740',
-    black: '#4b5a6f',
-    red: '#e53935',
-    green: '#2e7d32',
-    yellow: '#e65100',
-    blue: '#3493f9',
-    magenta: '#8e24aa',
-    cyan: '#00838f',
-    white: '#87929e',
-    brightBlack: '#68788f',
-    brightRed: '#fc96ab',
-    brightGreen: '#66bb6a',
-    brightYellow: '#ffb342',
-    brightBlue: '#4a8ac6',
-    brightMagenta: '#ba68c8',
-    brightCyan: '#4dd0e1',
-    brightWhite: '#ffffff'
-  };
   term = new Terminal({
-    theme: darkMode ? darkTermTheme : lightTermTheme,
+    theme: darkMode ? TERM_THEME_DARK : TERM_THEME_LIGHT,
     fontSize: 13,
     fontFamily: "'Cascadia Code', 'Consolas', monospace",
     cursorBlink: true,
@@ -2459,7 +2505,7 @@ function showLoreEditor(tabInfo) {
   // Save current Monaco state
   if (editorInstance && activeTabId !== tabInfo.id) {
     const curTab = openTabs.find(t => t.id === activeTabId);
-    if (curTab && !['_image', '_loreform', '_regexform'].includes(curTab.language) && curTab.setValue) {
+    if (curTab && !FORM_TAB_TYPES.has(curTab.language) && curTab.setValue) {
       curTab._lastValue = editorInstance.getValue();
       curTab.setValue(curTab._lastValue);
     }
@@ -2723,7 +2769,7 @@ function showRegexEditor(tabInfo) {
   // Save current Monaco state
   if (editorInstance && activeTabId !== tabInfo.id) {
     const curTab = openTabs.find(t => t.id === activeTabId);
-    if (curTab && !['_image', '_loreform', '_regexform'].includes(curTab.language) && curTab.setValue) {
+    if (curTab && !FORM_TAB_TYPES.has(curTab.language) && curTab.setValue) {
       curTab._lastValue = editorInstance.getValue();
       curTab.setValue(curTab._lastValue);
     }
@@ -3141,7 +3187,18 @@ async function showImageViewer(tabId, assetPath) {
     }
   }, { passive: false });
 
-  // Left-click drag to pan
+  // Left-click drag to pan (listeners added/removed per drag to avoid leaks)
+  const onMove = (e) => {
+    panX = panStartX + (e.clientX - dragStartX);
+    panY = panStartY + (e.clientY - dragStartY);
+    updateTransform();
+  };
+  const onUp = () => {
+    dragging = false;
+    wrapper.style.cursor = 'grab';
+    window.removeEventListener('mousemove', onMove);
+    window.removeEventListener('mouseup', onUp);
+  };
   wrapper.addEventListener('mousedown', (e) => {
     if (e.button !== 0) return;
     dragging = true;
@@ -3150,18 +3207,8 @@ async function showImageViewer(tabId, assetPath) {
     panStartX = panX;
     panStartY = panY;
     wrapper.style.cursor = 'grabbing';
-  });
-  window.addEventListener('mousemove', (e) => {
-    if (!dragging) return;
-    panX = panStartX + (e.clientX - dragStartX);
-    panY = panStartY + (e.clientY - dragStartY);
-    updateTransform();
-  });
-  window.addEventListener('mouseup', () => {
-    if (dragging) {
-      dragging = false;
-      wrapper.style.cursor = 'grab';
-    }
+    window.addEventListener('mousemove', onMove);
+    window.addEventListener('mouseup', onUp);
   });
 
   // Double-click to reset
@@ -3212,6 +3259,11 @@ function initMenuBar() {
     });
   });
 
+  // Prevent submenu parent from closing menu
+  document.querySelectorAll('.menu-sub').forEach(el => {
+    el.addEventListener('click', (e) => e.stopPropagation());
+  });
+
   // Click outside closes menus
   document.addEventListener('click', () => closeAllMenus());
 }
@@ -3226,7 +3278,10 @@ function openMenu(menuId) {
 }
 
 function closeAllMenus() {
-  document.querySelectorAll('.menu-item').forEach(el => el.classList.remove('open'));
+  if (openMenuId) {
+    const el = document.querySelector(`.menu-item[data-menu="${openMenuId}"]`);
+    if (el) el.classList.remove('open');
+  }
   openMenuId = null;
 }
 
@@ -3255,14 +3310,34 @@ function executeMenuAction(action) {
       if (editorInstance) editorInstance.trigger('menu', 'editor.action.startFindReplaceAction');
       break;
 
-    // View
+    // View — toggles
     case 'toggle-sidebar': toggleSidebar(); break;
     case 'toggle-terminal': toggleTerminal(); break;
     case 'toggle-avatar': toggleAvatar(); break;
-    case 'sidebar-left': moveSidebar('left'); break;
-    case 'sidebar-right': moveSidebar('right'); break;
+    // Items position
+    case 'items-left': moveItems('left'); break;
+    case 'items-right': moveItems('right'); break;
+    case 'items-far-left': moveItems('far-left'); break;
+    case 'items-far-right': moveItems('far-right'); break;
+    case 'items-top': moveItems('top'); break;
+    case 'items-bottom': moveItems('bottom'); break;
+    // Refs position
+    case 'refs-sidebar': moveRefs('sidebar'); break;
+    case 'refs-left': moveRefs('left'); break;
+    case 'refs-right': moveRefs('right'); break;
+    case 'refs-far-left': moveRefs('far-left'); break;
+    case 'refs-far-right': moveRefs('far-right'); break;
+    case 'refs-top': moveRefs('top'); break;
+    case 'refs-bottom': moveRefs('bottom'); break;
+    // Terminal position
     case 'terminal-bottom': moveTerminal('bottom'); break;
+    case 'terminal-left': moveTerminal('left'); break;
     case 'terminal-right': moveTerminal('right'); break;
+    case 'terminal-far-left': moveTerminal('far-left'); break;
+    case 'terminal-far-right': moveTerminal('far-right'); break;
+    case 'terminal-top': moveTerminal('top'); break;
+    // Reset
+    case 'layout-reset': resetLayout(); break;
     case 'zoom-in':
       if (editorInstance) {
         const sz = editorInstance.getOption(monaco.editor.EditorOption.fontSize);
@@ -3279,6 +3354,7 @@ function executeMenuAction(action) {
       if (editorInstance) editorInstance.updateOptions({ fontSize: 14 });
       break;
     case 'toggle-dark': toggleDarkMode(); break;
+    case 'preview-test': showPreviewPanel(); break;
     case 'devtools': window.tokiAPI.toggleDevTools(); break;
 
     // Terminal
@@ -3290,91 +3366,263 @@ function executeMenuAction(action) {
 
 // ==================== Layout Management ====================
 
-function applyLayout() {
-  const appBody = document.getElementById('app-body');
-  const mainContainer = document.getElementById('main-container');
-  const sidebar = document.getElementById('sidebar');
-  const sidebarResizer = document.getElementById('sidebar-resizer');
-  const bottomArea = document.getElementById('bottom-area');
-  const termResizer = document.getElementById('terminal-resizer');
-  const avatar = document.getElementById('toki-avatar');
-  const btn = document.getElementById('btn-terminal-toggle');
-  const sidebarBtn = document.getElementById('btn-sidebar-collapse');
+// ==================== Slot-Based Layout System ====================
 
-  // Terminal position: bottom vs right
-  if (layoutState.terminalPos === 'right') {
-    appBody.classList.add('layout-right');
-    bottomArea.style.height = '';  // clear bottom-mode inline height
-  } else {
-    appBody.classList.remove('layout-right');
-    bottomArea.style.width = '';   // clear right-mode inline width
-    avatar.style.height = '';      // clear right-mode avatar inline height
+// Cached layout DOM elements (populated once)
+const EL = {};
+function _cacheLayoutEls() {
+  if (EL._ready) return;
+  EL.sidebar = document.getElementById('sidebar');
+  EL.refsPanel = document.getElementById('refs-panel');
+  EL.bottomArea = document.getElementById('bottom-area');
+  EL.refsSection = document.getElementById('sidebar-refs-section');
+  EL.splitResizer = document.getElementById('sidebar-split-resizer');
+  EL.refsPanelContent = document.getElementById('refs-panel-content');
+  EL.avatar = document.getElementById('toki-avatar');
+  EL.termBtn = document.getElementById('btn-terminal-toggle');
+  EL.sidebarExpand = document.getElementById('sidebar-expand');
+  EL.sidebarRefs = document.getElementById('sidebar-refs');
+  // Cache slot & resizer elements
+  EL.slots = {};
+  EL.resizers = {};
+  for (const s of SLOT_IDS) {
+    EL.slots[s] = document.getElementById('slot-' + s);
+    EL.resizers[s] = document.getElementById('resizer-' + s);
+  }
+  EL._ready = true;
+}
+function getSlotEl(slotName) { return EL._ready ? EL.slots[slotName] : document.getElementById('slot-' + slotName); }
+function getResizerEl(slotName) { return EL._ready ? EL.resizers[slotName] : document.getElementById('resizer-' + slotName); }
+
+// Debounced layout refit
+let _layoutRefitTimer = null;
+function scheduleLayoutRefit() {
+  if (_layoutRefitTimer) clearTimeout(_layoutRefitTimer);
+  _layoutRefitTimer = setTimeout(() => {
+    _layoutRefitTimer = null;
+    if (editorInstance) editorInstance.layout();
+    if (fitAddon && term) fitAddon.fit();
+  }, 20);
+}
+
+function rebuildLayout() {
+  _cacheLayoutEls();
+  const { sidebar, refsPanel, bottomArea, refsSection, splitResizer, refsPanelContent, avatar, termBtn, sidebarExpand, sidebarRefs } = EL;
+
+  // 1. Clear all slots
+  for (const slotName of SLOT_IDS) {
+    const slot = EL.slots[slotName];
+    const resizer = EL.resizers[slotName];
+    if (slot) { slot.innerHTML = ''; slot.classList.remove('active'); }
+    if (resizer) resizer.classList.remove('active');
   }
 
-  // Sidebar position: left vs right
-  if (layoutState.sidebarPos === 'right') {
-    mainContainer.classList.add('sidebar-right');
-    sidebarBtn.textContent = '▶';
-  } else {
-    mainContainer.classList.remove('sidebar-right');
-    sidebarBtn.textContent = '◀';
-  }
+  // 2. Determine which panels go into which slots
+  const slotContents = {};
+  for (const s of SLOT_IDS) slotContents[s] = [];
 
-  // Sidebar visibility
-  sidebar.style.display = layoutState.sidebarVisible ? '' : 'none';
-  sidebarResizer.style.display = layoutState.sidebarVisible ? '' : 'none';
-
-  // Sidebar expand strip (visible only when sidebar is hidden)
-  const sidebarExpand = document.getElementById('sidebar-expand');
-  if (sidebarExpand) {
-    if (layoutState.sidebarVisible) {
-      sidebarExpand.classList.remove('visible');
+  // Items panel (sidebar)
+  if (layoutState.itemsVisible) {
+    slotContents[layoutState.itemsPos].push(sidebar);
+    if (layoutState.refsPos === 'sidebar') {
+      refsSection.style.display = '';
+      splitResizer.style.display = '';
+      refsPanel.style.display = 'none';
     } else {
-      sidebarExpand.classList.add('visible');
-      sidebarExpand.textContent = layoutState.sidebarPos === 'right' ? '◀' : '▶';
+      refsSection.style.display = 'none';
+      splitResizer.style.display = 'none';
+    }
+  } else {
+    sidebar.style.display = 'none';
+  }
+
+  // Refs panel (when separated) — move DOM nodes instead of innerHTML copy
+  if (layoutState.refsPos === '_popout') {
+    // Hidden — popped out to external window
+    refsPanel.style.display = 'none';
+    refsSection.style.display = 'none';
+    splitResizer.style.display = 'none';
+  } else if (layoutState.refsPos !== 'sidebar') {
+    if (sidebarRefs && refsPanelContent) {
+      refsPanelContent.innerHTML = '';
+      while (sidebarRefs.firstChild) {
+        refsPanelContent.appendChild(sidebarRefs.firstChild);
+      }
+    }
+    refsPanel.style.display = 'flex';
+    slotContents[layoutState.refsPos].push(refsPanel);
+  } else {
+    // Move nodes back to sidebar-refs if they were moved out
+    if (sidebarRefs && refsPanelContent && refsPanelContent.firstChild) {
+      while (refsPanelContent.firstChild) {
+        sidebarRefs.appendChild(refsPanelContent.firstChild);
+      }
+    }
+    refsPanel.style.display = 'none';
+  }
+
+  // Terminal panel
+  if (layoutState.terminalVisible) {
+    slotContents[layoutState.terminalPos].push(bottomArea);
+    bottomArea.style.display = 'flex';
+    const isV = V_SLOTS.has(layoutState.terminalPos);
+    bottomArea.classList.remove('panel-in-h', 'panel-in-v');
+    bottomArea.classList.add(isV ? 'panel-in-v' : 'panel-in-h');
+  } else {
+    bottomArea.style.display = 'none';
+  }
+
+  // Avatar visibility
+  if (avatar) avatar.style.display = layoutState.avatarVisible ? '' : 'none';
+  if (termBtn) termBtn.textContent = layoutState.terminalVisible ? '━' : '▲';
+
+  // 3. Place panels into their slots
+  for (const slotName of SLOT_IDS) {
+    const panels = slotContents[slotName];
+    if (panels.length === 0) continue;
+
+    const slot = EL.slots[slotName];
+    const resizer = EL.resizers[slotName];
+    if (!slot) continue;
+
+    slot.classList.add('active');
+    if (resizer) resizer.classList.add('active');
+
+    const isV = V_SLOTS.has(slotName);
+    if (isV) {
+      slot.style.width = (layoutState.slotSizes[slotName] || DEFAULT_SLOT_SIZES[slotName]) + 'px';
+      slot.style.height = '';
+    } else {
+      slot.style.height = (layoutState.slotSizes[slotName] || DEFAULT_SLOT_SIZES[slotName]) + 'px';
+      slot.style.width = '';
+    }
+
+    for (const panel of panels) {
+      panel.style.display = panel === bottomArea ? 'flex' : (panel === refsPanel ? 'flex' : '');
+      slot.appendChild(panel);
     }
   }
 
-  // Terminal visibility
-  bottomArea.style.display = layoutState.terminalVisible ? 'flex' : 'none';
-  termResizer.style.display = layoutState.terminalVisible ? '' : 'none';
-  btn.textContent = layoutState.terminalVisible ? '━' : '▲';
+  // 4. Sidebar expand strip
+  if (sidebarExpand) {
+    sidebarExpand.style.display = layoutState.itemsVisible ? 'none' : 'block';
+  }
 
-  // Avatar visibility
-  avatar.style.display = layoutState.avatarVisible ? '' : 'none';
+  // 5. Init slot resizers
+  initSlotResizers();
 
-  // Refit editor and terminal
-  if (editorInstance) setTimeout(() => editorInstance.layout(), 20);
-  if (fitAddon && term) setTimeout(() => fitAddon.fit(), 20);
+  // 6. Debounced refit
+  scheduleLayoutRefit();
+
+  saveLayout();
+}
+
+// Slot resizer drag handlers — stored for proper removal
+const _resizerHandlers = {};
+function initSlotResizers() {
+  for (const slotName of SLOT_IDS) {
+    const resizer = getResizerEl(slotName);
+    if (!resizer || !resizer.classList.contains('active')) continue;
+
+    // Remove previously registered handler if any
+    if (_resizerHandlers[slotName]) {
+      resizer.removeEventListener('mousedown', _resizerHandlers[slotName]);
+    }
+
+    const isV = V_SLOTS.has(slotName);
+    const handler = (e) => {
+      e.preventDefault();
+      const slot = getSlotEl(slotName);
+      if (!slot) return;
+      const startPos = isV ? e.clientX : e.clientY;
+      const startSize = isV ? slot.getBoundingClientRect().width : slot.getBoundingClientRect().height;
+
+      const growsReverse = (slotName === 'right' || slotName === 'far-right');
+      const growsReverseV = (slotName === 'bottom');
+
+      resizer.classList.add('dragging');
+      const onMove = (ev) => {
+        const delta = isV ? (ev.clientX - startPos) : (ev.clientY - startPos);
+        let dir = 1;
+        if (isV && growsReverse) dir = -1;
+        if (!isV && growsReverseV) dir = -1;
+        const newSize = Math.max(100, startSize + delta * dir);
+        if (isV) { slot.style.width = newSize + 'px'; }
+        else { slot.style.height = newSize + 'px'; }
+        layoutState.slotSizes[slotName] = newSize;
+      };
+      const onUp = () => {
+        resizer.classList.remove('dragging');
+        document.removeEventListener('mousemove', onMove);
+        document.removeEventListener('mouseup', onUp);
+        saveLayout();
+        if (editorInstance) setTimeout(() => editorInstance.layout(), 10);
+        if (fitAddon && term) setTimeout(() => fitAddon.fit(), 10);
+      };
+      document.addEventListener('mousemove', onMove);
+      document.addEventListener('mouseup', onUp);
+    };
+    _resizerHandlers[slotName] = handler;
+    resizer.addEventListener('mousedown', handler);
+  }
 }
 
 function toggleSidebar() {
-  layoutState.sidebarVisible = !layoutState.sidebarVisible;
-  applyLayout();
+  layoutState.itemsVisible = !layoutState.itemsVisible;
+  rebuildLayout();
 }
 
 function toggleTerminal() {
   layoutState.terminalVisible = !layoutState.terminalVisible;
-  applyLayout();
+  rebuildLayout();
 }
 
 function toggleAvatar() {
   layoutState.avatarVisible = !layoutState.avatarVisible;
-  applyLayout();
+  rebuildLayout();
 }
 
-function moveSidebar(pos) {
-  layoutState.sidebarPos = pos;
-  layoutState.sidebarVisible = true;
-  applyLayout();
-  setStatus(`사이드바 → ${pos === 'left' ? '좌측' : '우측'}`);
+const POS_LABELS = {
+  'left': '좌측', 'right': '우측', 'far-left': '좌끝', 'far-right': '우끝',
+  'top': '상단', 'bottom': '하단', 'sidebar': '사이드바'
+};
+
+function moveItems(pos) {
+  if (pos === 'hide') {
+    layoutState.itemsVisible = false;
+    rebuildLayout();
+    setStatus('항목 숨김');
+    return;
+  }
+  layoutState.itemsPos = pos;
+  layoutState.itemsVisible = true;
+  rebuildLayout();
+  setStatus(`항목 → ${POS_LABELS[pos] || pos}`);
 }
 
 function moveTerminal(pos) {
   layoutState.terminalPos = pos;
   layoutState.terminalVisible = true;
-  applyLayout();
-  setStatus(`터미널 → ${pos === 'bottom' ? '하단' : '우측'}`);
+  rebuildLayout();
+  setStatus(`터미널 → ${POS_LABELS[pos] || pos}`);
+}
+
+function moveRefs(pos) {
+  layoutState.refsPos = pos;
+  rebuildLayout();
+  setStatus(`참고자료 → ${POS_LABELS[pos] || pos}`);
+}
+
+function resetLayout() {
+  layoutState.itemsPos = 'left';
+  layoutState.terminalPos = 'bottom';
+  layoutState.refsPos = 'sidebar';
+  layoutState.itemsVisible = true;
+  layoutState.terminalVisible = true;
+  layoutState.avatarVisible = true;
+  layoutState.slotSizes = { ...DEFAULT_SLOT_SIZES };
+  rebuildLayout();
+  setStatus('레이아웃 초기화 완료');
 }
 
 async function restartTerminal() {
@@ -3447,7 +3695,7 @@ function updateRpButtonStyle(btn) {
 }
 
 async function handleClaudeStart() {
-  console.log('[Claude] handleClaudeStart called, rpMode:', rpMode);
+  // (debug log removed)
   if (!term) {
     setStatus('터미널이 준비되지 않았습니다');
     return;
@@ -3533,7 +3781,7 @@ async function handleClaudeStart() {
   let cmd;
   if (initPrompt) {
     const { filePath, platform } = await window.tokiAPI.writeSystemPrompt(initPrompt);
-    console.log('[Claude] System prompt written:', filePath, '(' + initPrompt.length + ' chars)', 'RP:', rpMode);
+    // (debug log removed)
     if (platform === 'win32') {
       // PowerShell: subexpression returns file content as single string argument
       cmd = `claude --append-system-prompt (Get-Content -Raw '${filePath}')\r`;
@@ -3578,7 +3826,7 @@ async function handleSave() {
   // Sync current editor content (skip form/image tabs)
   if (editorInstance && activeTabId) {
     const curTab = openTabs.find(t => t.id === activeTabId);
-    if (curTab && !['_image', '_loreform', '_regexform'].includes(curTab.language) && curTab.setValue) {
+    if (curTab && !FORM_TAB_TYPES.has(curTab.language) && curTab.setValue) {
       curTab.setValue(editorInstance.getValue());
     }
   }
@@ -3598,7 +3846,7 @@ async function handleSaveAs() {
   if (!fileData) return;
   if (editorInstance && activeTabId) {
     const curTab = openTabs.find(t => t.id === activeTabId);
-    if (curTab && !['_image', '_loreform', '_regexform'].includes(curTab.language) && curTab.setValue) {
+    if (curTab && !FORM_TAB_TYPES.has(curTab.language) && curTab.setValue) {
       curTab.setValue(editorInstance.getValue());
     }
   }
@@ -3628,85 +3876,14 @@ async function handleTerminalBg() {
 
 // ==================== Resizers ====================
 function initResizers() {
-  // Sidebar resizer
-  const sidebarResizer = document.getElementById('sidebar-resizer');
-  const sidebar = document.getElementById('sidebar');
-  let startX, startWidth;
+  // Slot resizers are initialized by rebuildLayout() → initSlotResizers()
+  // Only avatar-terminal resizer needs static init here
 
-  sidebarResizer.addEventListener('mousedown', (e) => {
-    startX = e.clientX;
-    startWidth = sidebar.offsetWidth;
-    sidebarResizer.classList.add('active');
-
-    const onMove = (e) => {
-      const dx = e.clientX - startX;
-      // When sidebar is on right, drag direction is inverted
-      const dir = layoutState.sidebarPos === 'right' ? -1 : 1;
-      sidebar.style.width = Math.max(120, startWidth + dx * dir) + 'px';
-    };
-    const onUp = () => {
-      sidebarResizer.classList.remove('active');
-      document.removeEventListener('mousemove', onMove);
-      document.removeEventListener('mouseup', onUp);
-      if (editorInstance) editorInstance.layout();
-    };
-    document.addEventListener('mousemove', onMove);
-    document.addEventListener('mouseup', onUp);
-  });
-
-  // Terminal resizer (resizes bottom-area — vertical or horizontal based on layout)
-  const termResizer = document.getElementById('terminal-resizer');
-  const bottomArea = document.getElementById('bottom-area');
-  const mainContainer = document.getElementById('main-container');
-
-  termResizer.addEventListener('mousedown', (e) => {
-    termResizer.classList.add('active');
-
-    if (layoutState.terminalPos === 'right') {
-      // Horizontal resize (col-resize)
-      const startX = e.clientX;
-      const startW = bottomArea.offsetWidth;
-
-      const onMove = (ev) => {
-        const dx = startX - ev.clientX;
-        bottomArea.style.width = Math.max(150, startW + dx) + 'px';
-      };
-      const onUp = () => {
-        termResizer.classList.remove('active');
-        document.removeEventListener('mousemove', onMove);
-        document.removeEventListener('mouseup', onUp);
-        if (editorInstance) editorInstance.layout();
-        if (fitAddon && term) fitAddon.fit();
-      };
-      document.addEventListener('mousemove', onMove);
-      document.addEventListener('mouseup', onUp);
-    } else {
-      // Vertical resize (row-resize)
-      const startY = e.clientY;
-      const startTermH = bottomArea.offsetHeight;
-
-      const onMove = (ev) => {
-        const dy = startY - ev.clientY;
-        bottomArea.style.height = Math.max(60, startTermH + dy) + 'px';
-      };
-      const onUp = () => {
-        termResizer.classList.remove('active');
-        document.removeEventListener('mousemove', onMove);
-        document.removeEventListener('mouseup', onUp);
-        if (editorInstance) editorInstance.layout();
-        if (fitAddon && term) fitAddon.fit();
-      };
-      document.addEventListener('mousemove', onMove);
-      document.addEventListener('mouseup', onUp);
-    }
-  });
-
-  // Avatar-terminal resizer (vertical, only in right mode)
   const avatarResizer = document.getElementById('avatar-resizer');
   const avatar = document.getElementById('toki-avatar');
   if (avatarResizer) {
     avatarResizer.addEventListener('mousedown', (e) => {
-      if (layoutState.terminalPos !== 'right') return;
+      if (!V_SLOTS.has(layoutState.terminalPos)) return; // only in vertical slots
       e.preventDefault();
       avatarResizer.classList.add('active');
       const startY = e.clientY;
@@ -3726,23 +3903,25 @@ function initResizers() {
     });
   }
 
-  // Terminal toggle (btn is inside terminal-area, toggles bottom-area)
+  // Terminal toggle
   document.getElementById('btn-terminal-toggle').addEventListener('click', () => toggleTerminal());
 }
 
 // ==================== Status (auto-hide) ====================
 let statusTimer = null;
+let _statusBar, _statusSpan;
 
 function setStatus(text) {
-  const bar = document.getElementById('statusbar');
-  const span = document.getElementById('status-text');
-  span.textContent = text;
-  bar.classList.add('visible');
+  if (!_statusBar) {
+    _statusBar = document.getElementById('statusbar');
+    _statusSpan = document.getElementById('status-text');
+  }
+  _statusSpan.textContent = text;
+  _statusBar.classList.add('visible');
 
-  // Auto-hide after 3 seconds
   if (statusTimer) clearTimeout(statusTimer);
   statusTimer = setTimeout(() => {
-    bar.classList.remove('visible');
+    _statusBar.classList.remove('visible');
   }, 3000);
 }
 
@@ -3825,53 +4004,7 @@ function applyDarkMode() {
 
   // Switch terminal (xterm) theme
   if (typeof term !== 'undefined' && term) {
-    term.options.theme = darkMode ? {
-      background: '#141a31',
-      foreground: '#d8dce8',
-      cursor: '#4a90d9',
-      cursorAccent: '#141a31',
-      selectionBackground: '#4a90d944',
-      selectionForeground: '#f0f2f8',
-      black: '#2e3a56',
-      red: '#ef5350',
-      green: '#66bb6a',
-      yellow: '#ffca28',
-      blue: '#4a90d9',
-      magenta: '#ba68c8',
-      cyan: '#4dd0e1',
-      white: '#d8dce8',
-      brightBlack: '#7a8ba5',
-      brightRed: '#fc96ab',
-      brightGreen: '#81c784',
-      brightYellow: '#ffb342',
-      brightBlue: '#6fb3f2',
-      brightMagenta: '#ce93d8',
-      brightCyan: '#80deea',
-      brightWhite: '#f0f2f8'
-    } : {
-      background: '#ffffff',
-      foreground: '#2a323e',
-      cursor: '#4a8ac6',
-      cursorAccent: '#ffffff',
-      selectionBackground: '#b3d4fc',
-      selectionForeground: '#1a2740',
-      black: '#4b5a6f',
-      red: '#e53935',
-      green: '#2e7d32',
-      yellow: '#e65100',
-      blue: '#3493f9',
-      magenta: '#8e24aa',
-      cyan: '#00838f',
-      white: '#87929e',
-      brightBlack: '#68788f',
-      brightRed: '#fc96ab',
-      brightGreen: '#66bb6a',
-      brightYellow: '#ffb342',
-      brightBlue: '#4a8ac6',
-      brightMagenta: '#ba68c8',
-      brightCyan: '#4dd0e1',
-      brightWhite: '#ffffff'
-    };
+    term.options.theme = darkMode ? TERM_THEME_DARK : TERM_THEME_LIGHT;
   }
 
   // Switch Monaco theme (global — affects all editor instances)
@@ -3960,7 +4093,7 @@ function bgmOnTerminalData() {
   }, BGM_SILENCE_MS);
 }
 
-// ==================== Toki Avatar (Chromakey Canvas) ====================
+// ==================== Toki Avatar ====================
 const TOKI_IDLE = '../../assets/icon.png';
 const TOKI_CUTE = '../../assets/toki-cute.gif';
 const TOKI_DANCING = '../../assets/Dancing_toki.gif';
@@ -4003,10 +4136,6 @@ let tokiCurrentSrc = TOKI_IDLE;
 
 function initTokiAvatar() {
   const display = document.getElementById('toki-avatar-display');
-
-  // Hide unused canvas element from HTML
-  const canvas = document.getElementById('toki-canvas');
-  if (canvas) canvas.style.display = 'none';
 
   // Img directly displays everything (static PNG + animated GIF)
   tokiImg = document.createElement('img');
@@ -4181,11 +4310,19 @@ function loadTokiImage(src) {
   }
 }
 
+// Cached avatar DOM elements (populated on first call)
+let _avatarEl, _statusEl, _statusIconEl, _statusTextEl;
 function setTokiActive(active) {
-  const avatar = document.getElementById('toki-avatar');
-  const statusEl = document.getElementById('toki-status');
-  const statusIcon = document.getElementById('toki-status-icon');
-  const statusText = document.getElementById('toki-status-text');
+  if (!_avatarEl) {
+    _avatarEl = document.getElementById('toki-avatar');
+    _statusEl = document.getElementById('toki-status');
+    _statusIconEl = document.getElementById('toki-status-icon');
+    _statusTextEl = document.getElementById('toki-status-text');
+  }
+  const avatar = _avatarEl;
+  const statusEl = _statusEl;
+  const statusIcon = _statusIconEl;
+  const statusText = _statusTextEl;
 
   if (active && !tokiActive) {
     tokiActive = true;
@@ -5563,9 +5700,817 @@ function showSettingsPopup() {
   overlay.addEventListener('click', (e) => { if (e.target === overlay) overlay.remove(); });
 }
 
-// ==================== Panel Drag & Drop ====================
+// ==================== Preview Test Panel ====================
 
-let panelDragState = null;
+async function showPreviewPanel() {
+  if (!fileData) { setStatus('파일을 먼저 열어주세요'); return; }
+
+  // Remove existing
+  const existing = document.querySelector('.preview-overlay');
+  if (existing) existing.remove();
+
+  const charData = {
+    name: fileData.name || 'Character',
+    description: fileData.description || '',
+    firstMessage: fileData.firstMessage || '',
+    globalNote: fileData.globalNote || '',
+    css: fileData.css || '',
+    defaultVariables: fileData.defaultVariables || '',
+    lua: fileData.lua || '',
+    lorebook: fileData.lorebook || [],
+    regex: fileData.regex || [],
+  };
+
+  // Load all assets (name → data URI)
+  let assetMapForEngine = {};
+  try {
+    const assetResult = await window.tokiAPI.getAllAssetsMap();
+    assetMapForEngine = assetResult.assets || assetResult;
+    const d = assetResult.debug || {};
+    // (debug log removed)
+  } catch (e) {
+    console.warn('[Preview] Asset loading error:', e);
+  }
+
+  // Initialize preview engine
+  PreviewEngine.resetVars();
+  PreviewEngine.setCharName(charData.name);
+  PreviewEngine.setUserName('User');
+  PreviewEngine.setDefaultVars(charData.defaultVariables);
+  PreviewEngine.setCharDescription(charData.description);
+  PreviewEngine.setCharFirstMessage(charData.firstMessage);
+  PreviewEngine.setAssets(assetMapForEngine);
+  PreviewEngine.setLorebook(charData.lorebook || []);
+
+  let previewMessages = [];
+  let msgIndex = 0;
+  let debugOpen = false;
+  let activeDebugTab = 'variables';
+  let luaInitialized = false;
+  let _reloadQueued = false;
+
+  // reloadDisplay callback — queue a re-render after current Lua execution
+  PreviewEngine.onReloadDisplay(() => { _reloadQueued = true; });
+
+  // ── Simple Markdown ──
+  function simpleMarkdown(text) {
+    if (!text) return '';
+    // Preserve existing HTML tags and entities
+    const htmlTags = [];
+    text = text.replace(/<[^>]+>/g, (m) => { htmlTags.push(m); return `\x00HTAG${htmlTags.length - 1}\x00`; });
+    // Bold **text** and __text__
+    text = text.replace(/\*\*(.+?)\*\*/g, '<strong>$1</strong>');
+    text = text.replace(/__(.+?)__/g, '<strong>$1</strong>');
+    // Italic *text* and _text_
+    text = text.replace(/(?<!\*)\*(?!\*)(.+?)(?<!\*)\*(?!\*)/g, '<em>$1</em>');
+    text = text.replace(/(?<!_)_(?!_)(.+?)(?<!_)_(?!_)/g, '<em>$1</em>');
+    // RisuAI quote styling: "text" → colored (curly quotes)
+    text = text.replace(/\u201C([^\u201D]+)\u201D/g, '<span style="color:var(--FontColorQuote2)">\u201C$1\u201D</span>');
+    // Straight quotes — only match when quotes appear at text boundaries (not inside placeholders)
+    text = text.replace(/(?:^|(?<=[\s\n(]))\"([^"]+?)\"(?=[\s\n).,!?;:]|$)/gm, '<span style="color:var(--FontColorQuote2)">\u201C$1\u201D</span>');
+    // Code `text`
+    text = text.replace(/`([^`]+)`/g, '<code>$1</code>');
+    // Newlines to <br>
+    text = text.replace(/\n/g, '<br>');
+    // Restore HTML tags
+    text = text.replace(/\x00HTAG(\d+)\x00/g, (_, i) => htmlTags[parseInt(i)]);
+    return text;
+  }
+
+  // ── Build iframe HTML document ──
+  function buildChatDoc() {
+    const processedCSS = PreviewEngine.risuChatParser(charData.css || '', { runVar: true });
+
+    return `<!DOCTYPE html><html><head><meta charset="UTF-8">
+<meta http-equiv="Content-Security-Policy" content="default-src * 'unsafe-inline' 'unsafe-eval'; img-src * data: blob:; style-src * 'unsafe-inline'; font-src * data: blob:; media-src * data: blob:; connect-src * data: blob:;">
+<style>
+:root {
+  --FontColorStandard: #fafafa;
+  --FontColorBold: #e5e5e5;
+  --FontColorItalic: #8c8d93;
+  --FontColorItalicBold: #8c8d93;
+  --FontColorQuote1: #8BE9FD;
+  --FontColorQuote2: #FFB86C;
+  --risu-theme-bgcolor: #282a36;
+  --risu-theme-darkbg: #21222c;
+  --risu-theme-textcolor: #f5f5f5;
+  --risu-theme-textcolor2: #64748b;
+  --risu-theme-borderc: #6272a4;
+  --risu-theme-selected: #44475a;
+  --risu-theme-draculared: #ff5555;
+  --risu-theme-darkborderc: #4b5563;
+  --risu-theme-darkbutton: #374151;
+  --risu-font-family: Arial, sans-serif, serif;
+}
+* { box-sizing: border-box; margin: 0; padding: 0; }
+body {
+  background: var(--risu-theme-bgcolor);
+  color: var(--risu-theme-textcolor);
+  font-family: var(--risu-font-family);
+  min-height: 100vh;
+  position: relative;
+  overflow-x: hidden;
+  overflow-y: auto;
+}
+/* Background DOM (charx CSS/HTML overlay) */
+.background-dom {
+  position: fixed;
+  top: 0; left: 0;
+  width: 100%; height: 100%;
+  pointer-events: none;
+  z-index: 10;
+}
+.background-dom * { pointer-events: auto; }
+/* Chat container */
+.default-chat-screen {
+  position: relative;
+  z-index: 1;
+  display: flex;
+  flex-direction: column;
+  min-height: 100vh;
+  padding: 8px 0 80px;
+}
+/* Individual message */
+.risu-chat {
+  display: flex;
+  width: 100%;
+  max-width: 100%;
+  justify-content: center;
+  box-sizing: border-box;
+}
+.chat-message-container { }
+.chat-message-container:last-child .dyna-icon { display: block; }
+.risu-chat-inner {
+  display: flex;
+  color: var(--risu-theme-textcolor);
+  margin: 4px 16px 4px 16px;
+  padding: 8px;
+  flex-grow: 1;
+  align-items: flex-start;
+  max-width: 100%;
+  width: 100%;
+  box-sizing: border-box;
+}
+.chat-avatar {
+  width: 45px;
+  height: 45px;
+  min-width: 45px;
+  border-radius: 6px;
+  background-color: var(--risu-theme-selected);
+  background-size: cover;
+  background-position: center;
+  box-shadow: 0 2px 8px rgba(0,0,0,0.3);
+  flex-shrink: 0;
+}
+.chat-content {
+  display: flex;
+  flex-direction: column;
+  margin-left: 16px;
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+}
+.chat-name {
+  font-size: 1rem;
+  font-weight: 600;
+  color: var(--risu-theme-textcolor);
+  margin-bottom: 4px;
+}
+.flexium { display: flex; flex-direction: row; justify-content: flex-start; }
+.chat-width {
+  max-width: 100%;
+  word-break: normal;
+  overflow-wrap: anywhere;
+}
+/* Chattext (message body) — main styling target */
+.chattext {
+  font-size: 1rem;
+  line-height: 1.75;
+  color: var(--FontColorStandard);
+}
+.chattext p { color: var(--FontColorStandard); margin: 0.25em 0; }
+.chattext em { color: var(--FontColorItalic); font-style: italic; }
+.chattext strong { color: var(--FontColorBold); font-weight: bold; }
+.chattext strong em, .chattext em strong { color: var(--FontColorItalicBold); font-weight: bold; font-style: italic; }
+.chattext mark[risu-mark="quote1"] { background: transparent; color: var(--FontColorQuote1); }
+.chattext mark[risu-mark="quote2"] { background: transparent; color: var(--FontColorQuote2); }
+.chattext img { max-width: 100%; height: auto; border-radius: 4px; margin: 4px 0; }
+.chattext a { color: #8BE9FD; text-decoration: underline; }
+.chattext code { background: rgba(255,255,255,0.1); padding: 2px 6px; border-radius: 3px; font-size: 0.9em; font-family: 'Cascadia Code','Consolas',monospace; }
+.chattext pre { background: rgba(0,0,0,0.3); padding: 12px; border-radius: 6px; overflow-x: auto; margin: 8px 0; }
+.chattext pre code { background: none; padding: 0; }
+.chattext hr { border: none; border-top: 1px solid var(--risu-theme-borderc); margin: 8px 0; }
+.chattext blockquote, .chattext mark[risu-mark="blockquote1"] {
+  display: block;
+  border-left: 4px solid var(--FontColorQuote1);
+  background: color-mix(in srgb, transparent 90%, var(--FontColorQuote1) 10%);
+  padding: 0.5rem 1rem;
+  color: var(--FontColorQuote1);
+  margin: 4px 0;
+}
+/* CBS Button */
+.cbs-button {
+  display: inline-block;
+  padding: 6px 16px;
+  margin: 4px 2px;
+  background: var(--risu-theme-selected);
+  color: var(--risu-theme-textcolor);
+  border: 1px solid var(--risu-theme-borderc);
+  border-radius: 6px;
+  cursor: pointer;
+  font-size: 0.9em;
+  transition: background 0.15s;
+}
+.cbs-button:hover { background: var(--risu-theme-borderc); }
+/* Scrollbar */
+::-webkit-scrollbar { width: 8px; }
+::-webkit-scrollbar-track { background: var(--risu-theme-darkbg); }
+::-webkit-scrollbar-thumb { background: var(--risu-theme-selected); border-radius: 4px; }
+::-webkit-scrollbar-thumb:hover { background: var(--risu-theme-borderc); }
+</style>
+</head><body>
+<div class="background-dom" id="bg-dom">${processedCSS}</div>
+<div class="default-chat-screen" id="chat-container"></div>
+<script>
+function cbsClick(varName, value) {
+  window.parent.postMessage({ type: 'cbs-button', varName: varName, value: value }, '*');
+}
+document.addEventListener('click', function(e) {
+  var btn = e.target.closest('[risu-btn]');
+  if (btn) {
+    e.preventDefault();
+    e.stopPropagation();
+    var data = btn.getAttribute('risu-btn');
+    window.parent.postMessage({ type: 'risu-btn', data: data }, '*');
+    return;
+  }
+  var trig = e.target.closest('[risu-trigger]');
+  if (trig) {
+    e.preventDefault();
+    e.stopPropagation();
+    var name = trig.getAttribute('risu-trigger');
+    window.parent.postMessage({ type: 'risu-trigger', name: name }, '*');
+  }
+});
+</script>
+</body></html>`;
+  }
+
+  // ── Add message to iframe ──
+  async function addMessage(role, rawContent) {
+    const doc = chatFrame.contentDocument;
+    if (!doc) return;
+    const container = doc.getElementById('chat-container');
+    if (!container) return;
+
+    const scripts = charData.regex || [];
+
+    // Process content through pipeline
+    let content = rawContent;
+    // (debug log removed)
+    // CBS options with message context (for {{chat_index}}, {{lastmessageid}} etc.)
+    const cbsOpts = (runVar) => ({
+      runVar,
+      chatID: msgIndex,
+      messageCount: previewMessages.length + 1,
+    });
+
+    if (role === 'char') {
+      content = PreviewEngine.processRegex(content, scripts, 'editoutput');
+      if (luaInitialized) content = await PreviewEngine.runLuaTrigger('editOutput', content);
+      content = PreviewEngine.risuChatParser(content, cbsOpts(true));
+      content = PreviewEngine.processRegex(content, scripts, 'editdisplay');
+      // Second CBS pass — regex(editdisplay) may output {{#if}}/{{getvar}} tags
+      content = PreviewEngine.risuChatParser(content, cbsOpts(true));
+      if (luaInitialized) content = await PreviewEngine.runLuaTrigger('editDisplay', content);
+      content = PreviewEngine.risuChatParser(content, cbsOpts(false));
+    } else {
+      content = PreviewEngine.processRegex(content, scripts, 'editinput');
+      if (luaInitialized) content = await PreviewEngine.runLuaTrigger('editInput', content);
+      content = PreviewEngine.risuChatParser(content, cbsOpts(true));
+    }
+
+    // Markdown
+    content = simpleMarkdown(content);
+
+    // Resolve asset image src to data URIs
+    content = PreviewEngine.resolveAssetImages(content);
+
+    const idx = msgIndex++;
+    const wrapper = doc.createElement('div');
+    wrapper.className = 'chat-message-container';
+    wrapper.setAttribute('x-hashed', String(idx));
+
+    const name = role === 'char' ? charData.name : 'User';
+    const avatarBg = role === 'char' ? 'var(--risu-theme-selected)' : 'var(--risu-theme-borderc)';
+
+    wrapper.innerHTML = `<div class="risu-chat" data-chat-index="${idx}">
+  <div class="risu-chat-inner">
+    <div class="chat-avatar" style="background-color:${avatarBg}"></div>
+    <span class="chat-content">
+      <div class="flexium items-center chat-width">
+        <div class="chat-width chat-name">${escapeHtmlPreview(name)}</div>
+      </div>
+      <span class="chattext chat-width prose">${content}</span>
+    </span>
+  </div>
+</div>`;
+
+    container.appendChild(wrapper);
+    previewMessages.push({ role, content: rawContent });
+
+    // Scroll to bottom
+    doc.documentElement.scrollTop = doc.documentElement.scrollHeight;
+  }
+
+  function escapeHtmlPreview(str) {
+    return str.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+  }
+
+  // ── Refresh backgroundHTML + Lua output (after variable changes) ──
+  function refreshBackground() {
+    const doc = chatFrame.contentDocument;
+    if (!doc) return;
+    const bgDom = doc.getElementById('bg-dom');
+    if (bgDom) {
+      let processed = PreviewEngine.risuChatParser(charData.css || '', { runVar: true });
+      // Append Lua setOutput HTML
+      const luaHTML = PreviewEngine.getLuaOutputHTML();
+      if (luaHTML) {
+        let parsedLuaHTML = PreviewEngine.risuChatParser(luaHTML, { runVar: true });
+        parsedLuaHTML = PreviewEngine.resolveAssetImages(parsedLuaHTML);
+        processed += parsedLuaHTML;
+      }
+      bgDom.innerHTML = processed;
+    }
+  }
+
+  // ── Handle user send ──
+  async function handleSend() {
+    const text = chatInput.value.trim();
+    if (!text) return;
+    chatInput.value = '';
+
+    // User message
+    await addMessage('user', text);
+
+    // Lorebook matching
+    const loreMatches = PreviewEngine.matchLorebook(previewMessages, charData.lorebook || []);
+
+    // Lua trigger (input)
+    if (luaInitialized) {
+      try { await PreviewEngine.runLuaTrigger('input', text); } catch (e) { /* */ }
+    }
+
+    // Simulated character response
+    let response;
+    if (charData.firstMessage && previewMessages.length <= 2) {
+      response = charData.firstMessage;
+    } else {
+      response = `${charData.name}: "${text}"에 대한 응답입니다.`;
+    }
+
+    // Lua trigger (output)
+    if (luaInitialized) {
+      try { await PreviewEngine.runLuaTrigger('output', response); } catch (e) { /* */ }
+    }
+
+    await addMessage('char', response);
+    refreshBackground();
+    if (debugOpen) updateDebugPanel();
+  }
+
+  // ── Re-render all messages (after variable changes) ──
+  async function reRenderMessages() {
+    const doc = chatFrame.contentDocument;
+    if (!doc) return;
+    const container = doc.getElementById('chat-container');
+    if (!container) return;
+    container.innerHTML = '';
+    const saved = [...previewMessages];
+    previewMessages = [];
+    msgIndex = 0;
+    for (const msg of saved) {
+      await addMessage(msg.role, msg.content);
+    }
+    refreshBackground();
+    if (debugOpen) updateDebugPanel();
+  }
+
+  // ── Listen for button clicks from iframe ──
+  function onMessage(e) {
+    if (!e.data) return;
+    if (e.data.type === 'cbs-button') {
+      PreviewEngine.setChatVar(e.data.varName, e.data.value);
+      reRenderMessages();
+    } else if (e.data.type === 'risu-btn') {
+      (async () => {
+        _reloadQueued = false;
+        const chatId = previewMessages.length > 0 ? previewMessages.length - 1 : 0;
+        if (luaInitialized) {
+          try {
+            await PreviewEngine.runLuaButtonClick(chatId, e.data.data);
+          } catch (err) { console.warn('[risu-btn] Lua error:', err); }
+        }
+        await reRenderMessages();
+        _reloadQueued = false; // consumed by reRender
+      })();
+    } else if (e.data.type === 'risu-trigger') {
+      (async () => {
+        _reloadQueued = false;
+        if (luaInitialized) {
+          try {
+            await PreviewEngine.runLuaTriggerByName(e.data.name);
+          } catch (err) { console.warn('[risu-trigger] Lua error:', err); }
+        }
+        await reRenderMessages();
+        _reloadQueued = false;
+      })();
+    }
+  }
+  window.addEventListener('message', onMessage);
+
+  // ══════════════ Build UI ══════════════
+
+  const overlay = document.createElement('div');
+  overlay.className = 'preview-overlay';
+
+  const panel = document.createElement('div');
+  panel.className = 'preview-panel';
+
+  // ── Header ──
+  const header = document.createElement('div');
+  header.className = 'preview-header';
+  const headerLeft = document.createElement('span');
+  headerLeft.textContent = `${charData.name} — 프리뷰`;
+  const headerBtns = document.createElement('div');
+  headerBtns.style.cssText = 'display:flex;gap:4px;align-items:center;';
+
+  const popoutPreviewBtn = document.createElement('button');
+  popoutPreviewBtn.textContent = '↗';
+  popoutPreviewBtn.title = '팝아웃 (별도 창)';
+  popoutPreviewBtn.addEventListener('click', async () => {
+    // Collect charData for popout
+    await window.tokiAPI.setPreviewPopoutData({
+      name: charData.name,
+      description: charData.description,
+      firstMessage: charData.firstMessage,
+      defaultVariables: charData.defaultVariables,
+      lua: charData.lua,
+      css: charData.css,
+      lorebook: charData.lorebook,
+      regex: charData.regex,
+      assets: null // assets handled via IPC separately
+    });
+    await window.tokiAPI.popoutPanel('preview');
+    // Close the inline preview
+    window.removeEventListener('message', onMessage);
+    overlay.remove();
+  });
+
+  const resetBtn = document.createElement('button');
+  resetBtn.textContent = '↻';
+  resetBtn.title = '초기화';
+  resetBtn.addEventListener('click', async () => {
+    PreviewEngine.resetVars();
+    PreviewEngine.setDefaultVars(charData.defaultVariables);
+    PreviewEngine.setCharDescription(charData.description);
+    PreviewEngine.setCharFirstMessage(charData.firstMessage);
+    previewMessages = [];
+    msgIndex = 0;
+    const doc = chatFrame.contentDocument;
+    if (doc) {
+      doc.open();
+      doc.write(buildChatDoc());
+      doc.close();
+      // Re-init Lua
+      if (charData.lua) {
+        luaInitialized = await PreviewEngine.initLua(charData.lua);
+        if (luaInitialized) {
+          try { await PreviewEngine.runLuaTrigger('start', null); } catch(e) {}
+        }
+      }
+      if (charData.firstMessage) await addMessage('char', charData.firstMessage);
+      refreshBackground();
+    }
+    if (debugOpen) updateDebugPanel();
+  });
+
+  const debugBtn = document.createElement('button');
+  debugBtn.textContent = '🔧';
+  debugBtn.title = '디버그 패널';
+  debugBtn.addEventListener('click', () => {
+    debugOpen = !debugOpen;
+    debugDrawer.style.display = debugOpen ? '' : 'none';
+    if (debugOpen) updateDebugPanel();
+  });
+
+  const closeBtn = document.createElement('button');
+  closeBtn.textContent = '✕';
+  closeBtn.addEventListener('click', () => {
+    window.removeEventListener('message', onMessage);
+    if (debugDetached) debugDrawer.remove();
+    overlay.remove();
+  });
+
+  headerBtns.appendChild(popoutPreviewBtn);
+  headerBtns.appendChild(resetBtn);
+  headerBtns.appendChild(debugBtn);
+  headerBtns.appendChild(closeBtn);
+  header.appendChild(headerLeft);
+  header.appendChild(headerBtns);
+
+  // ── Chat iframe ──
+  const chatFrame = document.createElement('iframe');
+  chatFrame.className = 'preview-chat-frame';
+
+  // ── Input bar ──
+  const inputBar = document.createElement('div');
+  inputBar.className = 'preview-input-bar';
+  const chatInput = document.createElement('textarea');
+  chatInput.className = 'preview-input-textarea';
+  chatInput.placeholder = '메시지를 입력하세요...';
+  chatInput.rows = 1;
+  const sendBtn = document.createElement('button');
+  sendBtn.className = 'preview-send-btn';
+  sendBtn.textContent = '전송';
+  sendBtn.addEventListener('click', handleSend);
+  chatInput.addEventListener('keydown', (e) => {
+    if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); handleSend(); }
+  });
+  // Auto-resize textarea
+  chatInput.addEventListener('input', () => {
+    chatInput.style.height = 'auto';
+    chatInput.style.height = Math.min(chatInput.scrollHeight, 120) + 'px';
+  });
+  inputBar.appendChild(chatInput);
+  inputBar.appendChild(sendBtn);
+
+  // ── Debug drawer (hidden by default) ──
+  const debugDrawer = document.createElement('div');
+  debugDrawer.className = 'preview-debug-drawer';
+  debugDrawer.style.display = 'none';
+
+  const debugTabs = document.createElement('div');
+  debugTabs.className = 'preview-debug-tabs';
+  const tabDefs = [
+    { id: 'variables', label: '변수' },
+    { id: 'lorebook', label: '로어북' },
+    { id: 'lua', label: 'Lua' },
+    { id: 'regex', label: '정규식' },
+  ];
+  for (const td of tabDefs) {
+    const tab = document.createElement('button');
+    tab.className = 'preview-debug-tab' + (td.id === activeDebugTab ? ' active' : '');
+    tab.textContent = td.label;
+    tab.addEventListener('click', () => {
+      activeDebugTab = td.id;
+      debugTabs.querySelectorAll('.preview-debug-tab').forEach(t => t.classList.remove('active'));
+      tab.classList.add('active');
+      updateDebugPanel();
+    });
+    debugTabs.appendChild(tab);
+  }
+  // Copy debug button
+  const debugCopyBtn = document.createElement('button');
+  debugCopyBtn.className = 'preview-debug-copy-btn';
+  debugCopyBtn.textContent = '📋 복사';
+  debugCopyBtn.title = '디버그 정보 전체 복사';
+  debugCopyBtn.addEventListener('click', () => {
+    const lines = [];
+    lines.push(`=== 프리뷰 디버그 (${new Date().toLocaleTimeString()}) ===`);
+    lines.push(`\n[Lua] ${luaInitialized ? '활성' : '비활성'}`);
+    const luaOut = PreviewEngine.getLuaOutput();
+    if (luaOut.length) lines.push(luaOut.join('\n'));
+    const lore = charData.lorebook || [];
+    lines.push(`\n[로어북] ${lore.filter(e => e.mode !== 'folder').length}개`);
+    const scripts = charData.regex || [];
+    lines.push(`[정규식] ${scripts.length}개`);
+    lines.push(`\n[메시지] ${previewMessages.length}개`);
+    for (const m of previewMessages) lines.push(`  [${m.role}] ${m.content?.substring(0, 100)}`);
+    navigator.clipboard.writeText(lines.join('\n')).then(() => {
+      debugCopyBtn.textContent = '✅ 복사됨';
+      setTimeout(() => { debugCopyBtn.textContent = '📋 복사'; }, 1500);
+    });
+  });
+  debugTabs.appendChild(debugCopyBtn);
+
+  // ── Debug detach/dock button ──
+  let debugDetached = false;
+  let debugDragOffset = { x: 0, y: 0 };
+
+  const debugDetachBtn = document.createElement('button');
+  debugDetachBtn.className = 'preview-debug-copy-btn';
+  debugDetachBtn.textContent = '⇱ 분리';
+  debugDetachBtn.title = '디버그 패널 분리 (플로팅)';
+  debugDetachBtn.addEventListener('click', () => {
+    if (debugDetached) dockDebugPanel();
+    else detachDebugPanel();
+  });
+  debugTabs.appendChild(debugDetachBtn);
+
+  function detachDebugPanel() {
+    debugDetached = true;
+    debugDetachBtn.textContent = '⇲ 도킹';
+    debugDetachBtn.title = '디버그 패널 도킹 (복귀)';
+    document.body.appendChild(debugDrawer);
+    debugDrawer.classList.add('preview-debug-floating');
+    debugDrawer.style.display = '';
+    debugDrawer.style.left = '50%';
+    debugDrawer.style.top = '50%';
+    debugDrawer.style.transform = 'translate(-50%, -50%)';
+
+    // Make tabs a drag handle
+    debugTabs.style.cursor = 'grab';
+    debugTabs.addEventListener('mousedown', onDebugDragStart);
+  }
+
+  function dockDebugPanel() {
+    debugDetached = false;
+    debugDetachBtn.textContent = '⇱ 분리';
+    debugDetachBtn.title = '디버그 패널 분리 (플로팅)';
+    debugDrawer.classList.remove('preview-debug-floating');
+    debugDrawer.style.left = '';
+    debugDrawer.style.top = '';
+    debugDrawer.style.transform = '';
+    panel.appendChild(debugDrawer);
+    debugDrawer.style.display = debugOpen ? '' : 'none';
+    debugTabs.style.cursor = '';
+    debugTabs.removeEventListener('mousedown', onDebugDragStart);
+  }
+
+  function onDebugDragStart(e) {
+    if (e.target.tagName === 'BUTTON') return;
+    e.preventDefault();
+    const rect = debugDrawer.getBoundingClientRect();
+    debugDragOffset.x = e.clientX - rect.left;
+    debugDragOffset.y = e.clientY - rect.top;
+    debugDrawer.style.transform = '';
+    debugTabs.style.cursor = 'grabbing';
+    document.addEventListener('mousemove', onDebugDragMove);
+    document.addEventListener('mouseup', onDebugDragEnd);
+  }
+
+  function onDebugDragMove(e) {
+    debugDrawer.style.left = (e.clientX - debugDragOffset.x) + 'px';
+    debugDrawer.style.top = (e.clientY - debugDragOffset.y) + 'px';
+  }
+
+  function onDebugDragEnd() {
+    debugTabs.style.cursor = 'grab';
+    document.removeEventListener('mousemove', onDebugDragMove);
+    document.removeEventListener('mouseup', onDebugDragEnd);
+  }
+
+  const debugContent = document.createElement('div');
+  debugContent.className = 'preview-debug-content';
+  debugDrawer.appendChild(debugTabs);
+  debugDrawer.appendChild(debugContent);
+
+  function updateDebugPanel() {
+    debugContent.innerHTML = '';
+    const vars = PreviewEngine.getVariables();
+    const lore = charData.lorebook || [];
+    const scripts = charData.regex || [];
+
+    if (activeDebugTab === 'variables') {
+      const keys = Object.keys(vars);
+      if (!keys.length) { debugContent.innerHTML = '<div class="preview-debug-empty">변수 없음</div>'; return; }
+      let html = '<table class="preview-debug-table"><tr><th>이름</th><th>값</th></tr>';
+      for (const k of keys) html += `<tr><td>${escapeHtmlPreview(k)}</td><td>${escapeHtmlPreview(String(vars[k]))}</td></tr>`;
+      html += '</table>';
+      if (charData.defaultVariables) html += `<pre class="preview-debug-pre" style="margin-top:6px;">${escapeHtmlPreview(charData.defaultVariables)}</pre>`;
+      debugContent.innerHTML = html;
+    } else if (activeDebugTab === 'lorebook') {
+      if (!lore.length) { debugContent.innerHTML = '<div class="preview-debug-empty">로어북 없음</div>'; return; }
+      const matches = previewMessages.length > 0 ? PreviewEngine.matchLorebook(previewMessages, lore) : [];
+      const matchSet = new Set(matches.map(m => m.index));
+      let html = '<table class="preview-debug-table"><tr><th>#</th><th>이름</th><th>키</th><th>상태</th></tr>';
+      for (let i = 0; i < lore.length; i++) {
+        const e = lore[i];
+        if (e.mode === 'folder') continue;
+        const active = matchSet.has(i);
+        const match = matches.find(m => m.index === i);
+        const cls = active ? ' class="preview-lore-active"' : '';
+        html += `<tr${cls}><td>${i}</td><td>${escapeHtmlPreview(e.comment || '')}</td><td>${escapeHtmlPreview(e.key || '')}</td><td>${
+          e.alwaysActive ? '🟢 항상' : active ? '🟢 ' + escapeHtmlPreview(match.reason) : e.key ? '⚫' : '⬜'
+        }</td></tr>`;
+      }
+      html += '</table>';
+      debugContent.innerHTML = html;
+    } else if (activeDebugTab === 'lua') {
+      const output = PreviewEngine.getLuaOutput();
+      let html = '';
+      if (!luaInitialized) {
+        html += '<button class="preview-send-btn" id="lua-init-btn" style="margin-bottom:6px;">Lua 초기화</button>';
+      } else {
+        html += '<div style="color:#4caf50;font-size:11px;margin-bottom:4px;">✅ Lua 활성</div>';
+      }
+      html += `<pre class="preview-debug-pre" style="min-height:50px;">${output.length ? escapeHtmlPreview(output.join('\n')) : '(출력 없음)'}</pre>`;
+      debugContent.innerHTML = html;
+      if (!luaInitialized) {
+        const btn = debugContent.querySelector('#lua-init-btn');
+        if (btn) btn.addEventListener('click', async () => {
+          btn.textContent = '초기화 중...'; btn.disabled = true;
+          luaInitialized = await PreviewEngine.initLua(charData.lua);
+          updateDebugPanel();
+        });
+      }
+    } else if (activeDebugTab === 'regex') {
+      if (!scripts.length) { debugContent.innerHTML = '<div class="preview-debug-empty">정규식 없음</div>'; return; }
+      const types = ['editinput', 'editoutput', 'editdisplay', 'editrequest'];
+      let html = '';
+      for (const type of types) {
+        const filtered = scripts.filter(s => s.type === type && s.ableFlag !== false);
+        if (!filtered.length) continue;
+        html += `<div style="font-weight:600;color:#4a90d9;margin:4px 0 2px;font-size:11px;">${type} (${filtered.length})</div>`;
+        html += '<table class="preview-debug-table"><tr><th>이름</th><th>찾기</th><th>바꾸기</th></tr>';
+        for (const s of filtered) {
+          html += `<tr><td>${escapeHtmlPreview(s.comment || '')}</td><td><code>${escapeHtmlPreview(s.find || s.in || '')}</code></td><td><code>${escapeHtmlPreview((s.replace || s.out || '').substring(0, 50))}</code></td></tr>`;
+        }
+        html += '</table>';
+      }
+      debugContent.innerHTML = html;
+    }
+  }
+
+  // ── Debug resizer (between input bar and debug drawer) ──
+  const debugResizer = document.createElement('div');
+  debugResizer.className = 'preview-debug-resizer';
+  debugResizer.style.display = 'none';
+  let debugResizing = false;
+  debugResizer.addEventListener('mousedown', (e) => {
+    if (debugDetached) return;
+    e.preventDefault();
+    debugResizing = true;
+    const startY = e.clientY;
+    const startH = debugDrawer.getBoundingClientRect().height;
+    const onMove = (ev) => {
+      const delta = startY - ev.clientY;
+      const newH = Math.max(80, Math.min(startH + delta, panel.getBoundingClientRect().height - 200));
+      debugDrawer.style.height = newH + 'px';
+    };
+    const onUp = () => {
+      debugResizing = false;
+      document.removeEventListener('mousemove', onMove);
+      document.removeEventListener('mouseup', onUp);
+    };
+    document.addEventListener('mousemove', onMove);
+    document.addEventListener('mouseup', onUp);
+  });
+
+  // Show/hide resizer when debug opens/closes
+  debugBtn.addEventListener('click', () => {
+    debugResizer.style.display = debugOpen ? '' : 'none';
+  });
+
+  // ── Assemble ──
+  panel.appendChild(header);
+  panel.appendChild(chatFrame);
+  panel.appendChild(inputBar);
+  panel.appendChild(debugResizer);
+  panel.appendChild(debugDrawer);
+  overlay.appendChild(panel);
+  document.body.appendChild(overlay);
+
+  // Initialize iframe after it's in the DOM
+  requestAnimationFrame(async () => {
+    const doc = chatFrame.contentDocument || chatFrame.contentWindow.document;
+    doc.open();
+    doc.write(buildChatDoc());
+    doc.close();
+    // Auto-init Lua
+    if (charData.lua) {
+      luaInitialized = await PreviewEngine.initLua(charData.lua);
+      if (luaInitialized) {
+        try { await PreviewEngine.runLuaTrigger('start', null); } catch (e) {
+          console.warn('[Preview] Lua onStart error:', e);
+        }
+        refreshBackground();
+      }
+    }
+    // Render first message
+    if (charData.firstMessage) {
+      setTimeout(async () => {
+        await addMessage('char', charData.firstMessage);
+        refreshBackground();
+      }, 50);
+    }
+  });
+
+  // Escape to close
+  const onKey = (e) => {
+    if (e.key === 'Escape') {
+      window.removeEventListener('message', onMessage);
+      if (debugDetached) debugDrawer.remove();
+      overlay.remove();
+      document.removeEventListener('keydown', onKey);
+    }
+  };
+  document.addEventListener('keydown', onKey);
+}
+
+// ==================== Panel Drag & Drop ====================
 
 function initPanelDragDrop() {
   // Make panel headers draggable
@@ -5632,17 +6577,26 @@ function initPanelDragDrop() {
       startPanelDrag(e, item.panel, item.label);
     });
 
-    // Right-click for pop-out option
+    // Right-click for position + pop-out options
     item.el.addEventListener('contextmenu', (e) => {
       e.preventDefault();
       e.stopPropagation();
 
       const isPoppedOut_ = isPanelPoppedOut(item.panel);
-      showContextMenu(e.clientX, e.clientY, [
+      const moveFn = item.panel === 'sidebar' ? moveItems : moveTerminal;
+      const posItems = [
+        { label: '→ 좌측', action: () => moveFn('left') },
+        { label: '→ 우측', action: () => moveFn('right') },
+        { label: '→ 좌끝', action: () => moveFn('far-left') },
+        { label: '→ 우끝', action: () => moveFn('far-right') },
+        { label: '→ 상단', action: () => moveFn('top') },
+        { label: '→ 하단', action: () => moveFn('bottom') },
+        { separator: true },
         isPoppedOut_
           ? { label: '도킹 (복원)', action: () => dockPanel(item.panel) }
           : { label: '팝아웃 (분리)', action: () => popOutPanel(item.panel) },
-      ]);
+      ];
+      showContextMenu(e.clientX, e.clientY, posItems);
     });
   }
 }
@@ -5665,11 +6619,11 @@ function startPanelDrag(e, panelId, label) {
     }
 
     if (dragging) {
-      // Highlight the zone under cursor
+      // Highlight the zone under cursor (rects cached at creation time)
       for (const zone of dropZones) {
-        const rect = zone.el.getBoundingClientRect();
-        if (ev.clientX >= rect.left && ev.clientX <= rect.right &&
-            ev.clientY >= rect.top && ev.clientY <= rect.bottom) {
+        const r = zone._rect;
+        if (ev.clientX >= r.left && ev.clientX <= r.right &&
+            ev.clientY >= r.top && ev.clientY <= r.bottom) {
           zone.el.classList.add('hover');
         } else {
           zone.el.classList.remove('hover');
@@ -5685,12 +6639,12 @@ function startPanelDrag(e, panelId, label) {
 
     if (!dragging) return;
 
-    // Find which zone was dropped on
+    // Find which zone was dropped on (use cached rects)
     let dropped = null;
     for (const zone of dropZones) {
-      const rect = zone.el.getBoundingClientRect();
-      if (ev.clientX >= rect.left && ev.clientX <= rect.right &&
-          ev.clientY >= rect.top && ev.clientY <= rect.bottom) {
+      const r = zone._rect;
+      if (ev.clientX >= r.left && ev.clientX <= r.right &&
+          ev.clientY >= r.top && ev.clientY <= r.bottom) {
         dropped = zone;
       }
       zone.el.remove();
@@ -5709,17 +6663,18 @@ function createDropZones(panelId) {
   const zones = [];
   const appBody = document.getElementById('app-body');
   const rect = appBody.getBoundingClientRect();
+  const e = 0.08; // edge ratio for far zones
+  const s = 0.15; // side ratio
 
-  // Define drop positions based on panel type
-  const positions = [];
-
-  if (panelId === 'sidebar') {
-    positions.push({ position: 'left', label: '좌측', x: rect.left, y: rect.top, w: rect.width * 0.15, h: rect.height });
-    positions.push({ position: 'right', label: '우측', x: rect.right - rect.width * 0.15, y: rect.top, w: rect.width * 0.15, h: rect.height });
-  } else if (panelId === 'terminal') {
-    positions.push({ position: 'bottom', label: '하단', x: rect.left, y: rect.bottom - rect.height * 0.2, w: rect.width, h: rect.height * 0.2 });
-    positions.push({ position: 'right', label: '우측', x: rect.right - rect.width * 0.2, y: rect.top, w: rect.width * 0.2, h: rect.height });
-  }
+  // All panels can go to all 6 positions
+  const positions = [
+    { position: 'far-left', label: '좌끝', x: rect.left, y: rect.top, w: rect.width * e, h: rect.height },
+    { position: 'left', label: '좌측', x: rect.left + rect.width * e, y: rect.top + rect.height * 0.15, w: rect.width * (s - e), h: rect.height * 0.7 },
+    { position: 'top', label: '상단', x: rect.left + rect.width * e, y: rect.top, w: rect.width * (1 - 2 * e), h: rect.height * 0.15 },
+    { position: 'bottom', label: '하단', x: rect.left + rect.width * e, y: rect.bottom - rect.height * 0.15, w: rect.width * (1 - 2 * e), h: rect.height * 0.15 },
+    { position: 'right', label: '우측', x: rect.right - rect.width * s, y: rect.top + rect.height * 0.15, w: rect.width * (s - e), h: rect.height * 0.7 },
+    { position: 'far-right', label: '우끝', x: rect.right - rect.width * e, y: rect.top, w: rect.width * e, h: rect.height },
+  ];
 
   for (const pos of positions) {
     const zone = document.createElement('div');
@@ -5735,7 +6690,7 @@ function createDropZones(panelId) {
     zone.appendChild(labelEl);
 
     document.body.appendChild(zone);
-    zones.push({ el: zone, position: pos.position });
+    zones.push({ el: zone, position: pos.position, _rect: zone.getBoundingClientRect() });
   }
 
   return zones;
@@ -5743,7 +6698,7 @@ function createDropZones(panelId) {
 
 function applyPanelDrop(panelId, position) {
   if (panelId === 'sidebar') {
-    moveSidebar(position);
+    moveItems(position);
   } else if (panelId === 'terminal') {
     moveTerminal(position);
   }
@@ -5760,7 +6715,7 @@ function isPanelPoppedOut(panelId) {
 async function popOutPanel(panelId) {
   if (isPanelPoppedOut(panelId)) return;
 
-  const handleTitle = panelId === 'sidebar' ? '항목' : 'TokiTalk';
+  const handleTitle = panelId === 'sidebar' ? '항목' : panelId === 'refs' ? '참고자료' : 'TokiTalk';
 
   // Create external window via IPC
   await window.tokiAPI.popoutPanel(panelId);
@@ -5768,11 +6723,14 @@ async function popOutPanel(panelId) {
 
   // Hide the panel in main window
   if (panelId === 'sidebar') {
-    layoutState.sidebarVisible = false;
+    layoutState.itemsVisible = false;
   } else if (panelId === 'terminal') {
     layoutState.terminalVisible = false;
+  } else if (panelId === 'refs') {
+    layoutState._refsPosBefore = layoutState.refsPos;
+    layoutState.refsPos = '_popout';
   }
-  applyLayout();
+  rebuildLayout();
 
   // Update popout button icon
   updatePopoutButtons();
@@ -5833,7 +6791,7 @@ function dockPanel(panelId) {
 
   // Show the panel back in main window
   if (panelId === 'sidebar') {
-    layoutState.sidebarVisible = true;
+    layoutState.itemsVisible = true;
   } else if (panelId === 'terminal') {
     layoutState.terminalVisible = true;
   } else if (panelId === 'editor') {
@@ -5842,8 +6800,11 @@ function dockPanel(panelId) {
       const curTab = openTabs.find(t => t.id === activeTabId);
       if (curTab) createOrSwitchEditor(curTab);
     }
+  } else if (panelId === 'refs') {
+    layoutState.refsPos = layoutState._refsPosBefore || 'sidebar';
+    delete layoutState._refsPosBefore;
   }
-  applyLayout();
+  rebuildLayout();
 
   // Refit terminal
   if (panelId === 'terminal' && fitAddon && term) {
@@ -5852,7 +6813,7 @@ function dockPanel(panelId) {
 
   updatePopoutButtons();
   updateTabUI();
-  const panelName = panelId === 'sidebar' ? '항목' : panelId === 'editor' ? '에디터' : 'TokiTalk';
+  const panelName = panelId === 'sidebar' ? '항목' : panelId === 'editor' ? '에디터' : panelId === 'refs' ? '참고자료' : 'TokiTalk';
   setStatus(`${panelName} 도킹됨`);
 }
 
@@ -5906,6 +6867,70 @@ function openTabById(tabId) {
         () => JSON.stringify(fileData.regex[idx], null, 2),
         (v) => { try { fileData.regex[idx] = JSON.parse(v); } catch(e){} });
     }
+  } else if (tabId.startsWith('guide_')) {
+    // Guide file from refs popout
+    const fileName = tabId.replace('guide_', '');
+    const existing = openTabs.find(t => t.id === tabId);
+    if (existing) {
+      activeTabId = tabId;
+      createOrSwitchEditor(existing);
+      updateTabUI();
+      return;
+    }
+    window.tokiAPI.readGuide(fileName).then(content => {
+      if (content == null) { setStatus('가이드 파일 읽기 실패'); return; }
+      openTab(tabId, `[가이드] ${fileName}`, 'plaintext',
+        () => content,
+        (val) => { window.tokiAPI.writeGuide(fileName, val); }
+      );
+    });
+  } else if (tabId.startsWith('ref_')) {
+    // Reference file item from refs popout
+    openRefTabById(tabId);
+  }
+}
+
+function openRefTabById(tabId) {
+  // Check if tab already open
+  const existing = openTabs.find(t => t.id === tabId);
+  if (existing) {
+    activeTabId = tabId;
+    createOrSwitchEditor(existing);
+    updateTabUI();
+    return;
+  }
+
+  // Parse: ref_{ri}_{field} or ref_{ri}_lb_{li} or ref_{ri}_rx_{xi}
+  const parts = tabId.split('_');
+  if (parts.length < 3) return;
+  const ri = parseInt(parts[1], 10);
+  if (ri < 0 || ri >= referenceFiles.length) return;
+  const ref = referenceFiles[ri];
+  const fieldPart = parts[2];
+
+  if (fieldPart === 'lua') {
+    openTab(tabId, `[참고] ${ref.fileName} - Lua`, 'lua', () => ref.data.lua, null);
+  } else if (fieldPart === 'css') {
+    openTab(tabId, `[참고] ${ref.fileName} - CSS`, 'css', () => ref.data.css, null);
+  } else if (fieldPart === 'globalNote') {
+    openTab(tabId, `[참고] ${ref.fileName} - 글로벌노트`, 'plaintext', () => ref.data.globalNote, null);
+  } else if (fieldPart === 'firstMessage') {
+    openTab(tabId, `[참고] ${ref.fileName} - 첫 메시지`, 'html', () => ref.data.firstMessage, null);
+  } else if (fieldPart === 'description') {
+    openTab(tabId, `[참고] ${ref.fileName} - 설명`, 'plaintext', () => ref.data.description, null);
+  } else if (fieldPart === 'lb' && parts.length >= 4) {
+    const li = parseInt(parts[3], 10);
+    if (ref.data.lorebook && ref.data.lorebook[li]) {
+      const lbLabel = ref.data.lorebook[li].comment || ref.data.lorebook[li].key || `#${li}`;
+      const tab = openTab(tabId, `[참고] ${ref.fileName} - ${lbLabel}`, '_loreform', () => ref.data.lorebook[li], null);
+      if (tab) tab._refLorebook = ref.data.lorebook;
+    }
+  } else if (fieldPart === 'rx' && parts.length >= 4) {
+    const xi = parseInt(parts[3], 10);
+    if (ref.data.regex && ref.data.regex[xi]) {
+      const rxLabel = ref.data.regex[xi].comment || `#${xi}`;
+      openTab(tabId, `[참고] ${ref.fileName} - ${rxLabel}`, '_regexform', () => ref.data.regex[xi], null);
+    }
   }
 }
 
@@ -5926,6 +6951,8 @@ function initKeyboard() {
       e.preventDefault(); toggleSidebar();
     } else if (e.ctrlKey && e.key === '`') {
       e.preventDefault(); toggleTerminal();
+    } else if (e.key === 'F5') {
+      e.preventDefault(); showPreviewPanel();
     } else if (e.key === 'Escape') {
       closeAllMenus();
     }
@@ -5945,8 +6972,8 @@ async function init() {
   document.getElementById('btn-sidebar-collapse').addEventListener('click', toggleSidebar);
   document.getElementById('btn-avatar-collapse').addEventListener('click', toggleAvatar);
   document.getElementById('sidebar-expand').addEventListener('click', () => {
-    layoutState.sidebarVisible = true;
-    applyLayout();
+    layoutState.itemsVisible = true;
+    rebuildLayout();
   });
   document.getElementById('toki-help-btn').addEventListener('click', showHelpPopup);
   document.getElementById('btn-settings').addEventListener('click', showSettingsPopup);
@@ -5955,6 +6982,19 @@ async function init() {
   applyDarkMode(); // Apply saved dark mode preference
   initChatMode();
   initPanelDragDrop();
+  // Refs panel dock button
+  const refsPanelDockBtn = document.getElementById('btn-refs-panel-dock');
+  if (refsPanelDockBtn) refsPanelDockBtn.addEventListener('click', () => moveRefs('sidebar'));
+  // Refs panel popout button (in separated refs-panel header)
+  const refsPanelPopoutBtn = document.getElementById('btn-refs-panel-popout');
+  if (refsPanelPopoutBtn) {
+    refsPanelPopoutBtn.addEventListener('click', () => {
+      if (isPanelPoppedOut('refs')) dockPanel('refs');
+      else popOutPanel('refs');
+    });
+  }
+  // Apply saved layout (restore positions)
+  rebuildLayout();
   if (autosaveEnabled) startAutosave();
   buildRefsSidebar(); // Load guides & refs even without a file open
 
@@ -5963,7 +7003,7 @@ async function init() {
     poppedOutPanels.delete(panelType);
     // Show the panel back in main window
     if (panelType === 'sidebar') {
-      layoutState.sidebarVisible = true;
+      layoutState.itemsVisible = true;
     } else if (panelType === 'terminal') {
       layoutState.terminalVisible = true;
     } else if (panelType === 'editor') {
@@ -5973,13 +7013,19 @@ async function init() {
         if (curTab) createOrSwitchEditor(curTab);
       }
       updateTabUI();
+    } else if (panelType === 'preview') {
+      // Re-open inline preview when popout docks
+      showPreviewPanel();
+    } else if (panelType === 'refs') {
+      layoutState.refsPos = layoutState._refsPosBefore || 'sidebar';
+      delete layoutState._refsPosBefore;
     }
-    applyLayout();
+    rebuildLayout();
     if (panelType === 'terminal' && fitAddon && term) {
       setTimeout(() => fitAddon.fit(), 50);
     }
     updatePopoutButtons();
-    const panelName = panelType === 'sidebar' ? '항목' : panelType === 'editor' ? '에디터' : 'TokiTalk';
+    const panelName = panelType === 'sidebar' ? '항목' : panelType === 'editor' ? '에디터' : panelType === 'preview' ? '프리뷰' : panelType === 'refs' ? '참고자료' : 'TokiTalk';
     setStatus(`${panelName} 도킹됨`);
   });
 
@@ -6004,10 +7050,15 @@ async function init() {
     openTabById(itemId);
   });
 
+  // Listen for refs popout clicks → open tab in main editor
+  window.tokiAPI.onPopoutRefsClick((tabId) => {
+    openTabById(tabId);
+  });
+
   // Listen for MCP data updates (Claude modified data via MCP server)
   window.tokiAPI.onDataUpdated((field, value) => {
     if (!fileData) return;
-    console.log('[mcp] data-updated:', field);
+    // (debug log removed)
 
     if (field === 'lorebook') {
       // Backup each open lorebook tab before overwrite
@@ -6096,14 +7147,14 @@ async function init() {
     dirtyFields.add(field);
   });
 
-  console.log('[init] Button handlers attached');
+  // (debug log removed)
 
   // Load Monaco (async)
   try {
     setStatus('Monaco 에디터 로딩 중...');
     await loadMonaco();
     if (darkMode) defineDarkMonacoTheme();
-    console.log('[init] Monaco loaded OK');
+    // (debug log removed)
     setStatus('준비');
   } catch (err) {
     console.error('[init] Monaco load failed:', err);
@@ -6113,7 +7164,7 @@ async function init() {
   // Load Terminal (async, non-blocking)
   try {
     await initTerminal();
-    console.log('[init] Terminal loaded OK');
+    // (debug log removed)
   } catch (err) {
     console.error('[init] Terminal load failed:', err);
     document.getElementById('terminal-container').innerHTML =

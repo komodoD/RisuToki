@@ -1,10 +1,11 @@
 'use strict';
 const { app, BrowserWindow, ipcMain, dialog } = require('electron');
 const path = require('path');
+const fs = require('fs');
 const os = require('os');
 const http = require('http');
 const crypto = require('crypto');
-const { openCharx, saveCharx } = require('./src/charx-io');
+const { openCharx, saveCharx, openRisum, saveRisum } = require('./src/charx-io');
 
 let mainWindow;
 let currentFilePath = null;
@@ -56,14 +57,21 @@ let apiServer = null;
 let apiPort = null;
 let apiToken = null;
 
+// Sync server (RisuAI live sync)
+let syncServer = null;
+let syncHash = 0;
+
 // Reference files (read-only, shared with MCP)
 let referenceFiles = []; // [{ fileName, data }]
 
 // Editor popout data relay
 let editorPopoutData = null; // { tabId, label, language, content, readOnly }
+// Preview popout data relay
+let previewPopoutData = null;
 
 // Broadcast to main window + all popout windows
 function broadcastToAll(channel, ...args) {
+  if (channel === 'data-updated') syncHash++;
   const allWindows = [mainWindow, ...Object.values(popoutWindows)];
   for (const win of allWindows) {
     if (win && !win.isDestroyed()) {
@@ -131,7 +139,6 @@ app.on('window-all-closed', () => {
   if (apiServer) { apiServer.close(); apiServer = null; }
   // Cleanup .mcp.json from CWD
   try {
-    const fs = require('fs');
     const cwd = currentFilePath ? path.dirname(currentFilePath) : process.cwd();
     const mcpPath = path.join(cwd, '.mcp.json');
     if (fs.existsSync(mcpPath)) fs.unlinkSync(mcpPath);
@@ -139,7 +146,6 @@ app.on('window-all-closed', () => {
   // Cleanup autosave file
   if (currentFilePath) {
     try {
-      const fs = require('fs');
       const dir = path.dirname(currentFilePath);
       const base = path.basename(currentFilePath);
       const autosavePath = path.join(dir, `.${base}.autosave.charx`);
@@ -210,15 +216,25 @@ ipcMain.handle('new-file', async () => {
 ipcMain.handle('open-file', async () => {
   try {
     const result = await dialog.showOpenDialog(mainWindow, {
-      filters: [{ name: 'Character Card', extensions: ['charx'] }],
+      filters: [
+        { name: 'RisuAI Files', extensions: ['charx', 'risum'] },
+        { name: 'Character Card', extensions: ['charx'] },
+        { name: 'RisuAI Module', extensions: ['risum'] }
+      ],
       properties: ['openFile']
     });
     if (result.canceled || !result.filePaths[0]) return null;
 
     currentFilePath = result.filePaths[0];
     console.log('[main] Opening:', currentFilePath);
-    currentData = openCharx(currentFilePath);
-    console.log('[main] Parsed OK, name:', currentData.name);
+    if (currentFilePath.endsWith('.risum')) {
+      currentData = openRisum(currentFilePath);
+    } else {
+      currentData = openCharx(currentFilePath);
+    }
+    console.log('[main] Parsed OK, name:', currentData.name, 'type:', currentData._fileType || 'charx');
+    invalidateAssetsMapCache();
+    invalidateSectionCaches();
     mainWindow.setTitle(`RisuToki - ${path.basename(currentFilePath)}`);
     return serializeForRenderer(currentData);
   } catch (err) {
@@ -231,11 +247,17 @@ ipcMain.handle('open-file', async () => {
 ipcMain.handle('save-file', async (_, updatedFields) => {
   if (!currentData) return { success: false, error: 'No file open' };
   applyUpdates(currentData, updatedFields);
+  invalidateAssetsMapCache();
+  invalidateSectionCaches();
 
   if (!currentFilePath) {
     return await saveAs(updatedFields);
   }
-  saveCharx(currentFilePath, currentData);
+  if (currentData._fileType === 'risum') {
+    saveRisum(currentFilePath, currentData);
+  } else {
+    saveCharx(currentFilePath, currentData);
+  }
   return { success: true, path: currentFilePath };
 });
 
@@ -244,14 +266,24 @@ ipcMain.handle('save-file-as', async (_, updatedFields) => {
   if (!currentData) return { success: false, error: 'No file open' };
   applyUpdates(currentData, updatedFields);
 
+  const isRisum = currentData._fileType === 'risum';
+  const filters = isRisum
+    ? [{ name: 'RisuAI Module', extensions: ['risum'] }]
+    : [{ name: 'Character Card', extensions: ['charx'] }];
+  const defaultExt = isRisum ? '.risum' : '.charx';
+
   const result = await dialog.showSaveDialog(mainWindow, {
-    filters: [{ name: 'Character Card', extensions: ['charx'] }],
-    defaultPath: currentFilePath || 'untitled.charx'
+    filters,
+    defaultPath: currentFilePath || `untitled${defaultExt}`
   });
   if (result.canceled || !result.filePath) return { success: false, error: 'Cancelled' };
 
   currentFilePath = result.filePath;
-  saveCharx(currentFilePath, currentData);
+  if (isRisum) {
+    saveRisum(currentFilePath, currentData);
+  } else {
+    saveCharx(currentFilePath, currentData);
+  }
   mainWindow.setTitle(`RisuToki - ${path.basename(currentFilePath)}`);
   return { success: true, path: currentFilePath };
 });
@@ -263,12 +295,16 @@ ipcMain.handle('get-file-path', () => currentFilePath);
 ipcMain.handle('open-reference', async () => {
   try {
     const result = await dialog.showOpenDialog(mainWindow, {
-      filters: [{ name: 'Character Card', extensions: ['charx'] }],
+      filters: [
+        { name: 'RisuAI Files', extensions: ['charx', 'risum'] },
+        { name: 'Character Card', extensions: ['charx'] },
+        { name: 'RisuAI Module', extensions: ['risum'] }
+      ],
       properties: ['openFile']
     });
     if (result.canceled || !result.filePaths[0]) return null;
     const refPath = result.filePaths[0];
-    const refData = openCharx(refPath);
+    const refData = refPath.endsWith('.risum') ? openRisum(refPath) : openCharx(refPath);
     const ref = {
       fileName: path.basename(refPath),
       filePath: refPath,
@@ -288,7 +324,7 @@ ipcMain.handle('open-reference', async () => {
 // Open reference file by path (for drag-and-drop)
 ipcMain.handle('open-reference-path', async (_, filePath) => {
   try {
-    const refData = openCharx(filePath);
+    const refData = filePath.endsWith('.risum') ? openRisum(filePath) : openCharx(filePath);
     const ref = {
       fileName: path.basename(filePath),
       filePath: filePath,
@@ -324,7 +360,6 @@ ipcMain.handle('pick-bg-image', async () => {
     properties: ['openFile']
   });
   if (result.canceled || !result.filePaths[0]) return null;
-  const fs = require('fs');
   const filePath = result.filePaths[0];
   const data = fs.readFileSync(filePath);
   const ext = path.extname(filePath).replace('.', '').toLowerCase();
@@ -455,7 +490,6 @@ ipcMain.handle('get-mcp-info', () => {
 
 function writeCurrentMcpConfig() {
   if (!apiPort || !apiToken) return null;
-  const fs = require('fs');
 
   const cwd = currentFilePath ? path.dirname(currentFilePath) : process.cwd();
   const configPath = path.join(cwd, '.mcp.json');
@@ -504,9 +538,133 @@ ipcMain.handle('get-asset-data', (_, assetPath) => {
   return asset.data.toString('base64');
 });
 
+// Get all assets as name → data URI map (for preview {{raw::name}} / {{asset::name}})
+let _assetsMapCache = null;
+function invalidateAssetsMapCache() { _assetsMapCache = null; }
+ipcMain.handle('get-all-assets-map', () => {
+  if (!currentData) return { assets: {}, debug: 'no data' };
+  if (_assetsMapCache) return _assetsMapCache;
+  const result = {};
+  const debug = {};
+
+  // 1) risuExt.additionalAssets — [[name, dataUri], ...]
+  const risuExt = currentData._risuExt || {};
+  const additionalAssets = risuExt.additionalAssets || [];
+  debug.additionalAssets = additionalAssets.length;
+  for (const aa of additionalAssets) {
+    if (Array.isArray(aa) && aa[0]) {
+      result[aa[0]] = aa[1] || '';
+    }
+  }
+
+  // 2) cardAssets (card.json data.assets) — all URI types
+  const cardAssets = currentData.cardAssets || [];
+  debug.cardAssets = cardAssets.length;
+  let cardResolved = 0, cardFailed = [];
+  for (const ca of cardAssets) {
+    const name = ca.name || '';
+    if (!name || result[name]) continue;
+    let uri = ca.uri || '';
+    if (uri.startsWith('ccdefault:')) {
+      const zipPath = uri.slice('ccdefault:'.length);
+      const asset = currentData.assets.find(a => a.path === zipPath);
+      if (asset) {
+        const ext = (ca.ext || 'png').toLowerCase();
+        const mime = ext === 'png' ? 'image/png' : ext === 'webp' ? 'image/webp' :
+                     ext === 'gif' ? 'image/gif' : ext === 'svg' ? 'image/svg+xml' : 'image/jpeg';
+        result[name] = `data:${mime};base64,${asset.data.toString('base64')}`;
+        cardResolved++;
+      } else {
+        // ccdefault path not found in zip — try filename match fallback
+        const targetName = zipPath.split('/').pop().replace(/\.[^.]+$/, '');
+        const fallback = currentData.assets.find(a => {
+          const fn = a.path.split('/').pop().replace(/\.[^.]+$/, '');
+          return fn === targetName;
+        });
+        if (fallback) {
+          const ext = (ca.ext || 'png').toLowerCase();
+          const mime = ext === 'png' ? 'image/png' : ext === 'webp' ? 'image/webp' :
+                       ext === 'gif' ? 'image/gif' : ext === 'svg' ? 'image/svg+xml' : 'image/jpeg';
+          result[name] = `data:${mime};base64,${fallback.data.toString('base64')}`;
+          cardResolved++;
+        } else {
+          cardFailed.push(name);
+        }
+      }
+    } else if (uri.startsWith('embeded://')) {
+      // RisuAI embeded:// scheme — maps to zip assets
+      const zipPath = uri.slice('embeded://'.length);
+      const asset = currentData.assets.find(a => a.path === zipPath);
+      if (asset) {
+        const ext = (ca.ext || zipPath.split('.').pop() || 'png').toLowerCase();
+        const mime = ext === 'png' ? 'image/png' : ext === 'webp' ? 'image/webp' :
+                     ext === 'gif' ? 'image/gif' : ext === 'svg' ? 'image/svg+xml' : 'image/jpeg';
+        result[name] = `data:${mime};base64,${asset.data.toString('base64')}`;
+        cardResolved++;
+      } else {
+        cardFailed.push(name);
+      }
+    } else if (uri.startsWith('data:')) {
+      // Inline data URI — use directly
+      result[name] = uri;
+      cardResolved++;
+    } else if (uri.startsWith('http://') || uri.startsWith('https://')) {
+      // External URL — pass through
+      result[name] = uri;
+      cardResolved++;
+    } else if (uri) {
+      // Unknown URI scheme — try as-is
+      result[name] = uri;
+      cardResolved++;
+    } else {
+      cardFailed.push(name);
+    }
+  }
+  debug.cardResolved = cardResolved;
+  if (cardFailed.length > 0) debug.cardFailed = cardFailed.slice(0, 20);
+
+  // 3) module.risum assets (risumAssets + module.assets metadata)
+  const modAssets = currentData._moduleData?.module?.assets || [];
+  const risumBinaries = currentData.risumAssets || [];
+  debug.modAssets = modAssets.length;
+  debug.risumBinaries = risumBinaries.length;
+  if (modAssets.length > 0) debug.modAssetSample = JSON.stringify(modAssets[0]).substring(0, 300);
+  for (let i = 0; i < modAssets.length; i++) {
+    const ma = modAssets[i];
+    const name = ma.name || (Array.isArray(ma) ? ma[0] : '') || '';
+    if (!name || result[name]) continue;
+    const idx = typeof ma.index === 'number' ? ma.index : i;
+    const bin = risumBinaries[idx];
+    if (bin) {
+      const ext = (ma.ext || (Array.isArray(ma) ? ma[2] : '') || 'png').toLowerCase();
+      const mime = ext === 'png' ? 'image/png' : ext === 'webp' ? 'image/webp' :
+                   ext === 'gif' ? 'image/gif' : ext === 'svg' ? 'image/svg+xml' : 'image/jpeg';
+      result[name] = `data:${mime};base64,${Buffer.isBuffer(bin) ? bin.toString('base64') : Buffer.from(bin).toString('base64')}`;
+    }
+  }
+
+  // 4) zip assets — filename-based mapping (fallback)
+  debug.zipAssets = (currentData.assets || []).length;
+  for (const asset of (currentData.assets || [])) {
+    const fileName = asset.path.split('/').pop();
+    const nameNoExt = fileName.replace(/\.[^.]+$/, '');
+    if (result[nameNoExt]) continue;
+    const ext = fileName.split('.').pop().toLowerCase();
+    const mime = ext === 'png' ? 'image/png' : ext === 'webp' ? 'image/webp' :
+                 ext === 'gif' ? 'image/gif' : ext === 'svg' ? 'image/svg+xml' : 'image/jpeg';
+    result[nameNoExt] = `data:${mime};base64,${asset.data.toString('base64')}`;
+  }
+
+  debug.totalResolved = Object.keys(result).length;
+
+  _assetsMapCache = { assets: result, debug };
+  return _assetsMapCache;
+});
+
 // Add asset via file dialog (targetFolder: 'icon' or 'other')
 ipcMain.handle('add-asset', async (_, targetFolder) => {
   if (!currentData) return null;
+  invalidateAssetsMapCache();
   const folder = targetFolder || 'other';
   const basePath = folder === 'icon' ? 'assets/icon' : 'assets/other/image';
   const result = await dialog.showOpenDialog(mainWindow, {
@@ -515,7 +673,6 @@ ipcMain.handle('add-asset', async (_, targetFolder) => {
   });
   if (result.canceled || !result.filePaths.length) return null;
 
-  const fs = require('fs');
   const added = [];
   for (const filePath of result.filePaths) {
     const fileName = path.basename(filePath);
@@ -536,6 +693,7 @@ ipcMain.handle('add-asset', async (_, targetFolder) => {
 // Add asset from drag-dropped buffer (targetFolder: 'icon' or 'other')
 ipcMain.handle('add-asset-buffer', (_, fileName, base64Data, targetFolder) => {
   if (!currentData) return null;
+  invalidateAssetsMapCache();
   const folder = targetFolder || 'other';
   const basePath = folder === 'icon' ? 'assets/icon' : 'assets/other/image';
   const assetPath = `${basePath}/${fileName}`;
@@ -551,6 +709,7 @@ ipcMain.handle('add-asset-buffer', (_, fileName, base64Data, targetFolder) => {
 // Delete asset
 ipcMain.handle('delete-asset', (_, assetPath) => {
   if (!currentData) return false;
+  invalidateAssetsMapCache();
   const idx = currentData.assets.findIndex(a => a.path === assetPath);
   if (idx === -1) return false;
   currentData.assets.splice(idx, 1);
@@ -576,7 +735,6 @@ ipcMain.handle('import-json', async () => {
   });
   if (result.canceled || !result.filePaths.length) return null;
 
-  const fs = require('fs');
   const imported = [];
   for (const filePath of result.filePaths) {
     try {
@@ -600,7 +758,6 @@ ipcMain.handle('autosave-file', async (_, updatedFields) => {
   const autosaveName = `${base}_autosave_${ts}.charx`;
   const autosavePath = path.join(dir, autosaveName);
   try {
-    const fs = require('fs');
     fs.mkdirSync(dir, { recursive: true });
     saveCharx(autosavePath, currentData);
     return { success: true, path: autosavePath };
@@ -613,7 +770,6 @@ ipcMain.handle('autosave-file', async (_, updatedFields) => {
 ipcMain.handle('cleanup-autosave', (_, customDir) => {
   // Cleanup old autosave files (keep latest 5)
   if (!currentFilePath) return false;
-  const fs = require('fs');
   const dir = customDir || path.dirname(currentFilePath);
   const base = path.basename(currentFilePath, path.extname(currentFilePath));
   const prefix = `${base}_autosave_`;
@@ -645,13 +801,11 @@ ipcMain.handle('pick-autosave-dir', async () => {
 
 // --- Persona files ---
 ipcMain.handle('read-persona', (_, name) => {
-  const fs = require('fs');
   const filePath = path.join(__dirname, 'assets', 'persona', `${name}.txt`);
   try { return fs.readFileSync(filePath, 'utf-8'); } catch (e) { return null; }
 });
 
 ipcMain.handle('write-persona', (_, name, content) => {
-  const fs = require('fs');
   const dir = path.join(__dirname, 'assets', 'persona');
   try { fs.mkdirSync(dir, { recursive: true }); } catch (e) { /* exists */ }
   const filePath = path.join(dir, `${name}.txt`);
@@ -659,15 +813,12 @@ ipcMain.handle('write-persona', (_, name, content) => {
 });
 
 ipcMain.handle('list-personas', () => {
-  const fs = require('fs');
   const dir = path.join(__dirname, 'assets', 'persona');
   try { return fs.readdirSync(dir).filter(f => f.endsWith('.txt')).map(f => f.replace('.txt', '')); } catch (e) { return []; }
 });
 
 // --- System Prompt (temp file for Claude CLI) ---
 ipcMain.handle('write-system-prompt', (_, content) => {
-  const fs = require('fs');
-  const os = require('os');
   const tmpFile = path.join(os.tmpdir(), 'toki-system-prompt.txt');
   fs.writeFileSync(tmpFile, content, 'utf-8');
   return { filePath: tmpFile, platform: process.platform };
@@ -683,7 +834,6 @@ function getGuidesDir() {
 }
 
 ipcMain.handle('list-guides', () => {
-  const fs = require('fs');
   const guidesDir = getGuidesDir();
   try {
     return fs.readdirSync(guidesDir).filter(f => f.endsWith('.md')).sort();
@@ -691,7 +841,6 @@ ipcMain.handle('list-guides', () => {
 });
 
 ipcMain.handle('read-guide', (_, filename) => {
-  const fs = require('fs');
   const filePath = path.join(getGuidesDir(), filename);
   try {
     return fs.readFileSync(filePath, 'utf-8');
@@ -699,15 +848,12 @@ ipcMain.handle('read-guide', (_, filename) => {
 });
 
 ipcMain.handle('write-guide', (_, filename, content) => {
-  const fs = require('fs');
   const guidesDir = getGuidesDir();
   try { fs.mkdirSync(guidesDir, { recursive: true }); } catch (e) { /* exists */ }
   try { fs.writeFileSync(path.join(guidesDir, filename), content, 'utf-8'); return true; } catch (e) { return false; }
 });
 
 ipcMain.handle('import-guide', async () => {
-  const { dialog } = require('electron');
-  const fs = require('fs');
   const result = await dialog.showOpenDialog(mainWindow, {
     title: '가이드 파일 불러오기',
     filters: [{ name: 'Markdown / Text', extensions: ['md', 'txt'] }],
@@ -738,14 +884,16 @@ ipcMain.handle('popout-create', async (_, panelType) => {
 
   const isTerminal = panelType === 'terminal';
   const isEditor = panelType === 'editor';
+  const isPreview = panelType === 'preview';
+  const isRefs = panelType === 'refs';
   const popout = new BrowserWindow({
-    width: isEditor ? 900 : (isTerminal ? 700 : 320),
-    height: isEditor ? 700 : (isTerminal ? 500 : 650),
-    minWidth: isEditor ? 400 : (isTerminal ? 300 : 200),
-    minHeight: 200,
+    width: isPreview ? 420 : (isEditor ? 900 : (isTerminal ? 700 : 320)),
+    height: isPreview ? 700 : (isEditor ? 700 : (isTerminal ? 500 : 650)),
+    minWidth: isPreview ? 320 : (isEditor ? 400 : (isTerminal ? 300 : 200)),
+    minHeight: isPreview ? 400 : 200,
     parent: mainWindow,
     frame: false,
-    title: isEditor ? 'RisuToki' : (isTerminal ? 'TokiTalk' : '항목'),
+    title: isEditor ? 'RisuToki' : (isTerminal ? 'TokiTalk' : (isRefs ? '참고자료' : '항목')),
     icon: path.join(__dirname, 'assets', 'icon.png'),
     webPreferences: {
       preload: path.join(__dirname, 'popout-preload.js'),
@@ -813,6 +961,21 @@ ipcMain.handle('popout-close', (_, panelType) => {
   return true;
 });
 
+// Preview popout data relay
+ipcMain.handle('set-preview-popout-data', (_, data) => {
+  previewPopoutData = data;
+  return true;
+});
+
+ipcMain.handle('get-preview-popout-data', () => {
+  return previewPopoutData;
+});
+
+// Guides absolute path
+ipcMain.handle('get-guides-path', () => {
+  return getGuidesDir();
+});
+
 // Sidebar popout: provide tree data
 ipcMain.handle('popout-sidebar-data', () => {
   if (!currentData) return { items: [] };
@@ -869,6 +1032,63 @@ ipcMain.handle('popout-sidebar-data', () => {
 ipcMain.on('popout-sidebar-click', (_, itemId) => {
   if (mainWindow && !mainWindow.isDestroyed()) {
     mainWindow.webContents.send('popout-sidebar-click', itemId);
+  }
+});
+
+// Refs popout: provide guide list + reference files tree
+ipcMain.handle('popout-refs-data', () => {
+  // Guides
+  const guidesDir = getGuidesDir();
+  let guides = [];
+  try { guides = fs.readdirSync(guidesDir).filter(f => f.endsWith('.md')).sort(); } catch (e) {}
+
+  // Reference files tree
+  const refs = [];
+  for (let ri = 0; ri < referenceFiles.length; ri++) {
+    const ref = referenceFiles[ri];
+    refs.push({ label: ref.fileName, icon: '📎', id: null, indent: 0, isHeader: true, refIdx: ri });
+    // Lua
+    if (ref.data.lua) {
+      refs.push({ label: 'Lua', icon: '{}', id: `ref_${ri}_lua`, indent: 1 });
+    }
+    // Fields
+    const fields = [
+      { id: 'globalNote', label: '글로벌노트' },
+      { id: 'firstMessage', label: '첫 메시지' },
+      { id: 'description', label: '설명' },
+    ];
+    for (const f of fields) {
+      if (ref.data[f.id]) refs.push({ label: f.label, icon: '·', id: `ref_${ri}_${f.id}`, indent: 1 });
+    }
+    // CSS
+    if (ref.data.css) {
+      refs.push({ label: 'CSS', icon: '🎨', id: `ref_${ri}_css`, indent: 1 });
+    }
+    // Lorebook
+    if (ref.data.lorebook && ref.data.lorebook.length > 0) {
+      refs.push({ label: `로어북 (${ref.data.lorebook.length})`, icon: '📚', id: null, indent: 1, isHeader: true });
+      for (let li = 0; li < ref.data.lorebook.length; li++) {
+        const entry = ref.data.lorebook[li];
+        if (entry.mode === 'folder') continue;
+        refs.push({ label: entry.comment || `#${li}`, icon: '·', id: `ref_${ri}_lb_${li}`, indent: 2 });
+      }
+    }
+    // Regex
+    if (ref.data.regex && ref.data.regex.length > 0) {
+      refs.push({ label: `정규식 (${ref.data.regex.length})`, icon: '⚡', id: null, indent: 1, isHeader: true });
+      for (let xi = 0; xi < ref.data.regex.length; xi++) {
+        refs.push({ label: ref.data.regex[xi].comment || `#${xi}`, icon: '·', id: `ref_${ri}_rx_${xi}`, indent: 2 });
+      }
+    }
+  }
+
+  return { guides, refs };
+});
+
+// Refs popout click → forward to main window
+ipcMain.on('popout-refs-click', (_, tabId) => {
+  if (mainWindow && !mainWindow.isDestroyed()) {
+    mainWindow.webContents.send('popout-refs-click', tabId);
   }
 });
 
@@ -981,9 +1201,25 @@ function detectCssBlockClose(line) {
   return /^={6,}$/.test(before);
 }
 
+let _cssStylePrefix = '';
+let _cssStyleSuffix = '';
+
 function parseCssSections(cssCode) {
+  _cssStylePrefix = '';
+  _cssStyleSuffix = '';
   if (!cssCode || !cssCode.trim()) return [{ name: 'main', content: '' }];
-  const lines = cssCode.split('\n');
+
+  // Preserve <style> wrapper if present
+  let work = cssCode;
+  const openMatch = work.match(/^(\s*<style[^>]*>\s*\n?)/i);
+  const closeMatch = work.match(/(\n?\s*<\/style>\s*)$/i);
+  if (openMatch && closeMatch) {
+    _cssStylePrefix = openMatch[1];
+    _cssStyleSuffix = closeMatch[1];
+    work = work.slice(openMatch[1].length, work.length - closeMatch[1].length);
+  }
+
+  const lines = work.split('\n');
   const sections = [];
   let currentName = null;
   let currentLines = [];
@@ -1050,9 +1286,34 @@ function parseCssSections(cssCode) {
 
 function combineCssSections(sections) {
   const eq = '============================================================';
-  return sections.map(s =>
+  const body = sections.map(s =>
     `/* ${eq}\n   ${s.name}\n   ${eq} */\n${s.content}`
   ).join('\n\n');
+  return _cssStylePrefix + body + _cssStyleSuffix;
+}
+
+// --- Cached Section Parsing (for MCP API hot path) ---
+let _luaCacheSource = null, _luaCacheResult = null;
+let _cssCacheSource = null, _cssCacheResult = null;
+
+function getCachedLuaSections(lua) {
+  if (lua !== _luaCacheSource) {
+    _luaCacheSource = lua;
+    _luaCacheResult = parseLuaSections(lua);
+  }
+  // Return deep copy so callers can mutate safely
+  return _luaCacheResult.map(s => ({ name: s.name, content: s.content }));
+}
+function getCachedCssSections(css) {
+  if (css !== _cssCacheSource) {
+    _cssCacheSource = css;
+    _cssCacheResult = parseCssSections(css);
+  }
+  return _cssCacheResult.map(s => ({ name: s.name, content: s.content }));
+}
+function invalidateSectionCaches() {
+  _luaCacheSource = null; _luaCacheResult = null;
+  _cssCacheSource = null; _cssCacheResult = null;
 }
 
 // --- Helpers ---
@@ -1060,6 +1321,7 @@ function combineCssSections(sections) {
 function serializeForRenderer(data) {
   // Don't send binary assets/internal fields to renderer
   return {
+    _fileType: data._fileType || 'charx',
     name: data.name,
     description: data.description,
     firstMessage: data.firstMessage,
@@ -1153,9 +1415,14 @@ function startApiServer() {
           );
 
           if (allowed) {
-            currentData[fieldName] = body.content;
-            broadcastToAll('data-updated', fieldName, body.content);
-            return jsonRes(res, { success: true, field: fieldName, size: newSize });
+            let content = body.content;
+            // Strip <style> wrapper from CSS to prevent nesting
+            if (fieldName === 'css') {
+              content = content.replace(/^\s*<style[^>]*>\s*/i, '').replace(/\s*<\/style>\s*$/i, '');
+            }
+            currentData[fieldName] = content;
+            broadcastToAll('data-updated', fieldName, content);
+            return jsonRes(res, { success: true, field: fieldName, size: content.length });
           } else {
             return jsonRes(res, { error: '사용자가 거부했습니다', rejected: true }, 403);
           }
@@ -1164,11 +1431,19 @@ function startApiServer() {
 
       // GET /lorebook
       if (parts[0] === 'lorebook' && !parts[1] && req.method === 'GET') {
-        const entries = (currentData.lorebook || []).map((e, i) => ({
+        let entries = (currentData.lorebook || []).map((e, i) => ({
           index: i, comment: e.comment || '', key: e.key || '',
           mode: e.mode || 'normal', alwaysActive: !!e.alwaysActive,
           contentSize: (e.content || '').length
         }));
+        // Optional filter: ?filter=keyword (searches comment and key)
+        const filterParam = url.searchParams.get('filter');
+        if (filterParam) {
+          const q = filterParam.toLowerCase();
+          entries = entries.filter(e =>
+            e.comment.toLowerCase().includes(q) || e.key.toLowerCase().includes(q)
+          );
+        }
         return jsonRes(res, { count: entries.length, entries });
       }
 
@@ -1265,7 +1540,11 @@ function startApiServer() {
         if (idx < 0 || idx >= (currentData.regex || []).length) {
           return jsonRes(res, { error: `Index ${idx} out of range` }, 400);
         }
-        return jsonRes(res, { index: idx, entry: currentData.regex[idx] });
+        // Strip in/out fields (use find/replace only) to avoid LLM confusion
+        const entry = { ...currentData.regex[idx] };
+        delete entry.in;
+        delete entry.out;
+        return jsonRes(res, { index: idx, entry });
       }
 
       // POST /regex/:idx (modify existing)
@@ -1284,6 +1563,12 @@ function startApiServer() {
 
         if (allowed) {
           Object.assign(currentData.regex[idx], body);
+          // Auto-sync find↔in, replace↔out fields
+          const entry = currentData.regex[idx];
+          if (body.find !== undefined && body.in === undefined) entry.in = body.find;
+          if (body.in !== undefined && body.find === undefined) entry.find = body.in;
+          if (body.replace !== undefined && body.out === undefined) entry.out = body.replace;
+          if (body.out !== undefined && body.replace === undefined) entry.replace = body.out;
           broadcastToAll('data-updated', 'regex', currentData.regex);
           return jsonRes(res, { success: true, index: idx });
         } else {
@@ -1305,6 +1590,11 @@ function startApiServer() {
           const entry = Object.assign({
             comment: '', type: 'editoutput', find: '', replace: '', flag: 'g'
           }, body);
+          // Auto-sync find↔in, replace↔out fields
+          if (entry.find && !entry.in) entry.in = entry.find;
+          if (entry.in && !entry.find) entry.find = entry.in;
+          if (entry.replace && !entry.out) entry.out = entry.replace;
+          if (entry.out && !entry.replace) entry.replace = entry.out;
           if (!currentData.regex) currentData.regex = [];
           currentData.regex.push(entry);
           broadcastToAll('data-updated', 'regex', currentData.regex);
@@ -1338,7 +1628,7 @@ function startApiServer() {
 
       // GET /lua — list Lua sections
       if (parts[0] === 'lua' && !parts[1] && req.method === 'GET') {
-        const sections = parseLuaSections(currentData.lua);
+        const sections = getCachedLuaSections(currentData.lua);
         const result = sections.map((s, i) => ({
           index: i, name: s.name, contentSize: s.content.length
         }));
@@ -1347,7 +1637,7 @@ function startApiServer() {
 
       // GET /lua/:idx — read Lua section
       if (parts[0] === 'lua' && parts[1] && req.method === 'GET') {
-        const sections = parseLuaSections(currentData.lua);
+        const sections = getCachedLuaSections(currentData.lua);
         const idx = parseInt(parts[1], 10);
         if (idx < 0 || idx >= sections.length) {
           return jsonRes(res, { error: `Lua section index ${idx} out of range (0-${sections.length - 1})` }, 400);
@@ -1356,8 +1646,8 @@ function startApiServer() {
       }
 
       // POST /lua/:idx — write Lua section
-      if (parts[0] === 'lua' && parts[1] && req.method === 'POST') {
-        const sections = parseLuaSections(currentData.lua);
+      if (parts[0] === 'lua' && parts[1] && !parts[2] && req.method === 'POST') {
+        const sections = getCachedLuaSections(currentData.lua);
         const idx = parseInt(parts[1], 10);
         if (idx < 0 || idx >= sections.length) {
           return jsonRes(res, { error: `Lua section index ${idx} out of range (0-${sections.length - 1})` }, 400);
@@ -1376,10 +1666,16 @@ function startApiServer() {
         );
 
         if (allowed) {
+          // Warn if content contains section separators
+          const sepLines = body.content.split('\n').filter(l => detectLuaSection(l) !== null);
+          let warning;
+          if (sepLines.length > 0) {
+            warning = `주의: 내용에 섹션 구분자 패턴이 ${sepLines.length}건 포함되어 있습니다. 의도치 않은 섹션 분할이 발생할 수 있습니다.`;
+          }
           sections[idx].content = body.content;
           currentData.lua = combineLuaSections(sections);
           broadcastToAll('data-updated', 'lua', currentData.lua);
-          return jsonRes(res, { success: true, index: idx, name: sectionName, size: newSize });
+          return jsonRes(res, { success: true, index: idx, name: sectionName, size: newSize, warning });
         } else {
           return jsonRes(res, { error: '사용자가 거부했습니다', rejected: true }, 403);
         }
@@ -1387,7 +1683,7 @@ function startApiServer() {
 
       // POST /lua/:idx/replace — find-and-replace within a Lua section
       if (parts[0] === 'lua' && parts[1] && parts[2] === 'replace' && req.method === 'POST') {
-        const sections = parseLuaSections(currentData.lua);
+        const sections = getCachedLuaSections(currentData.lua);
         const idx = parseInt(parts[1], 10);
         if (idx < 0 || idx >= sections.length) {
           return jsonRes(res, { error: `Lua section index ${idx} out of range (0-${sections.length - 1})` }, 400);
@@ -1445,7 +1741,7 @@ function startApiServer() {
 
       // POST /lua/:idx/insert — insert content into a Lua section
       if (parts[0] === 'lua' && parts[1] && parts[2] === 'insert' && req.method === 'POST') {
-        const sections = parseLuaSections(currentData.lua);
+        const sections = getCachedLuaSections(currentData.lua);
         const idx = parseInt(parts[1], 10);
         if (idx < 0 || idx >= sections.length) {
           return jsonRes(res, { error: `Lua section index ${idx} out of range (0-${sections.length - 1})` }, 400);
@@ -1485,10 +1781,21 @@ function startApiServer() {
         );
 
         if (allowed) {
+          // Escape section separators in inserted content to prevent unintended section splits
+          const separatorLines = newContent.split('\n').filter(l => detectLuaSection(l) !== null && !oldContent.includes(l));
+          let warning = '';
+          if (separatorLines.length > 0) {
+            // Replace equals signs in detected separators: ===== → ==·==
+            for (const sepLine of separatorLines) {
+              const escaped = sepLine.replace(/={3,}/g, m => m.slice(0, 2) + '·' + m.slice(3));
+              newContent = newContent.replace(sepLine, escaped);
+            }
+            warning = ` (경고: 섹션 구분자 ${separatorLines.length}건을 이스케이프 처리했습니다)`;
+          }
           sections[idx].content = newContent;
           currentData.lua = combineLuaSections(sections);
           broadcastToAll('data-updated', 'lua', currentData.lua);
-          return jsonRes(res, { success: true, index: idx, name: sectionName, position, oldSize: oldContent.length, newSize: newContent.length });
+          return jsonRes(res, { success: true, index: idx, name: sectionName, position, oldSize: oldContent.length, newSize: newContent.length, warning: warning || undefined });
         } else {
           return jsonRes(res, { error: '사용자가 거부했습니다', rejected: true }, 403);
         }
@@ -1496,7 +1803,7 @@ function startApiServer() {
 
       // GET /css-section — list CSS sections
       if (parts[0] === 'css-section' && !parts[1] && req.method === 'GET') {
-        const sections = parseCssSections(currentData.css);
+        const sections = getCachedCssSections(currentData.css);
         const result = sections.map((s, i) => ({
           index: i, name: s.name, contentSize: s.content.length
         }));
@@ -1505,7 +1812,7 @@ function startApiServer() {
 
       // GET /css-section/:idx — read CSS section
       if (parts[0] === 'css-section' && parts[1] && !parts[2] && req.method === 'GET') {
-        const sections = parseCssSections(currentData.css);
+        const sections = getCachedCssSections(currentData.css);
         const idx = parseInt(parts[1], 10);
         if (idx < 0 || idx >= sections.length) {
           return jsonRes(res, { error: `CSS section index ${idx} out of range (0-${sections.length - 1})` }, 400);
@@ -1515,7 +1822,7 @@ function startApiServer() {
 
       // POST /css-section/:idx — write CSS section
       if (parts[0] === 'css-section' && parts[1] && !parts[2] && req.method === 'POST') {
-        const sections = parseCssSections(currentData.css);
+        const sections = getCachedCssSections(currentData.css);
         const idx = parseInt(parts[1], 10);
         if (idx < 0 || idx >= sections.length) {
           return jsonRes(res, { error: `CSS section index ${idx} out of range (0-${sections.length - 1})` }, 400);
@@ -1545,7 +1852,7 @@ function startApiServer() {
 
       // POST /css-section/:idx/replace — find-and-replace within a CSS section
       if (parts[0] === 'css-section' && parts[1] && parts[2] === 'replace' && req.method === 'POST') {
-        const sections = parseCssSections(currentData.css);
+        const sections = getCachedCssSections(currentData.css);
         const idx = parseInt(parts[1], 10);
         if (idx < 0 || idx >= sections.length) {
           return jsonRes(res, { error: `CSS section index ${idx} out of range (0-${sections.length - 1})` }, 400);
@@ -1601,7 +1908,7 @@ function startApiServer() {
 
       // POST /css-section/:idx/insert — insert content into a CSS section
       if (parts[0] === 'css-section' && parts[1] && parts[2] === 'insert' && req.method === 'POST') {
-        const sections = parseCssSections(currentData.css);
+        const sections = getCachedCssSections(currentData.css);
         const idx = parseInt(parts[1], 10);
         if (idx < 0 || idx >= sections.length) {
           return jsonRes(res, { error: `CSS section index ${idx} out of range (0-${sections.length - 1})` }, 400);
@@ -1641,10 +1948,26 @@ function startApiServer() {
         );
 
         if (allowed) {
+          // Escape CSS section separators in inserted content to prevent unintended section splits
+          const newLines = newContent.split('\n');
+          let warning = '';
+          let escapedCount = 0;
+          for (let li = 0; li < newLines.length; li++) {
+            const line = newLines[li];
+            if (oldContent.includes(line)) continue;
+            if (detectCssSectionInline(line) !== null || detectCssBlockOpen(line) || detectCssBlockClose(line)) {
+              newLines[li] = line.replace(/={3,}/g, m => m.slice(0, 2) + '·' + m.slice(3));
+              escapedCount++;
+            }
+          }
+          if (escapedCount > 0) {
+            newContent = newLines.join('\n');
+            warning = ` (경고: CSS 섹션 구분자 ${escapedCount}건을 이스케이프 처리했습니다)`;
+          }
           sections[idx].content = newContent;
           currentData.css = combineCssSections(sections);
           broadcastToAll('data-updated', 'css', currentData.css);
-          return jsonRes(res, { success: true, index: idx, name: sectionName, position, oldSize: oldContent.length, newSize: newContent.length });
+          return jsonRes(res, { success: true, index: idx, name: sectionName, position, oldSize: oldContent.length, newSize: newContent.length, warning: warning || undefined });
         } else {
           return jsonRes(res, { error: '사용자가 거부했습니다', rejected: true }, 403);
         }
@@ -1699,3 +2022,99 @@ function startApiServer() {
     writeCurrentMcpConfig();
   });
 }
+
+// ==================== RisuAI Sync Server ====================
+function mapCharacterForRisuAI() {
+  if (!currentData) return null;
+  const lb = (currentData.lorebook || []).filter(e => e.mode !== 'folder').map(e => ({
+    key: e.key || '',
+    secondkey: e.secondkey || '',
+    insertorder: e.insertorder ?? e.order ?? 100,
+    comment: e.comment || '',
+    content: e.content || '',
+    mode: e.mode || 'normal',
+    alwaysActive: !!e.alwaysActive,
+    selective: !!e.selective,
+    useRegex: !!e.useRegex
+  }));
+  const rx = (currentData.regex || []).map(e => ({
+    comment: e.comment || '',
+    in: e.find || '',
+    out: e.replace || '',
+    type: e.type || 'editdisplay',
+    flag: e.flag || 'g',
+    ableFlag: e.ableFlag !== false
+  }));
+  return {
+    name: currentData.name || '',
+    desc: currentData.description || '',
+    firstMessage: currentData.firstMessage || '',
+    notes: currentData.globalNote || '',
+    backgroundHTML: currentData.css || '',
+    virtualscript: currentData.lua || '',
+    defaultVariables: currentData.defaultVariables || '',
+    globalLore: lb,
+    customscript: rx
+  };
+}
+
+function syncJsonRes(res, data, status) {
+  res.writeHead(status || 200, {
+    'Content-Type': 'application/json',
+    'Access-Control-Allow-Origin': '*',
+    'Access-Control-Allow-Methods': 'GET, OPTIONS',
+    'Access-Control-Allow-Headers': 'Content-Type'
+  });
+  res.end(JSON.stringify(data));
+}
+
+function startSyncServer(port) {
+  if (syncServer) return { ok: true, port };
+  port = port || 4735;
+  syncServer = http.createServer((req, res) => {
+    if (req.method === 'OPTIONS') {
+      res.writeHead(204, {
+        'Access-Control-Allow-Origin': '*',
+        'Access-Control-Allow-Methods': 'GET, OPTIONS',
+        'Access-Control-Allow-Headers': 'Content-Type'
+      });
+      return res.end();
+    }
+    const url = new URL(req.url, 'http://127.0.0.1');
+    const p = url.pathname;
+    if (p === '/status') {
+      return syncJsonRes(res, {
+        name: currentData ? currentData.name : null,
+        hash: syncHash,
+        hasFile: !!currentData
+      });
+    }
+    if (p === '/character') {
+      const mapped = mapCharacterForRisuAI();
+      if (!mapped) return syncJsonRes(res, { error: 'No file open' }, 400);
+      return syncJsonRes(res, mapped);
+    }
+    syncJsonRes(res, { error: 'Not found' }, 404);
+  });
+  syncServer.listen(port, '127.0.0.1', () => {
+    console.log(`[main] Sync server on 127.0.0.1:${port}`);
+    broadcastToAll('sync-status', true, port);
+  });
+  syncServer.on('error', (err) => {
+    console.error('[main] Sync server error:', err.message);
+    syncServer = null;
+    broadcastToAll('sync-status', false, 0);
+  });
+  return { ok: true, port };
+}
+
+function stopSyncServer() {
+  if (!syncServer) return;
+  syncServer.close();
+  syncServer = null;
+  console.log('[main] Sync server stopped');
+  broadcastToAll('sync-status', false, 0);
+}
+
+ipcMain.handle('start-sync', (_, port) => startSyncServer(port));
+ipcMain.handle('stop-sync', () => { stopSyncServer(); return { ok: true }; });

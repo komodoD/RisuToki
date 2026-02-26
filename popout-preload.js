@@ -24,4 +24,11 @@ contextBridge.exposeInMainWorld('popoutAPI', {
   getEditorData: () => ipcRenderer.invoke('get-editor-popout-data'),
   editorChange: (tabId, content) => ipcRenderer.send('editor-popout-change', tabId, content),
   editorSave: () => ipcRenderer.send('editor-popout-save'),
+
+  // Preview popout
+  getPreviewData: () => ipcRenderer.invoke('get-preview-popout-data'),
+
+  // Refs popout
+  getRefsData: () => ipcRenderer.invoke('popout-refs-data'),
+  refsItemClick: (tabId) => ipcRenderer.send('popout-refs-click', tabId),
 });

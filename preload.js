@@ -41,6 +41,7 @@ contextBridge.exposeInMainWorld('tokiAPI', {
   // Assets
   getAssetList: () => ipcRenderer.invoke('get-asset-list'),
   getAssetData: (assetPath) => ipcRenderer.invoke('get-asset-data', assetPath),
+  getAllAssetsMap: () => ipcRenderer.invoke('get-all-assets-map'),
   addAsset: (targetFolder) => ipcRenderer.invoke('add-asset', targetFolder),
   addAssetBuffer: (fileName, base64, targetFolder) => ipcRenderer.invoke('add-asset-buffer', fileName, base64, targetFolder),
   deleteAsset: (assetPath) => ipcRenderer.invoke('delete-asset', assetPath),
@@ -74,6 +75,11 @@ contextBridge.exposeInMainWorld('tokiAPI', {
   getAutosaveInfo: (customDir) => ipcRenderer.invoke('get-autosave-info', customDir),
   pickAutosaveDir: () => ipcRenderer.invoke('pick-autosave-dir'),
 
+  // Sync (RisuAI live sync)
+  startSync: (port) => ipcRenderer.invoke('start-sync', port),
+  stopSync: () => ipcRenderer.invoke('stop-sync'),
+  onSyncStatus: (cb) => { ipcRenderer.on('sync-status', (_, active, port) => cb(active, port)); },
+
   // DevTools
   toggleDevTools: () => ipcRenderer.invoke('toggle-devtools'),
 
@@ -82,9 +88,16 @@ contextBridge.exposeInMainWorld('tokiAPI', {
   closePopout: (type) => ipcRenderer.invoke('popout-close', type),
   onPopoutClosed: (cb) => { ipcRenderer.on('popout-closed', (_, type) => cb(type)); },
   onPopoutSidebarClick: (cb) => { ipcRenderer.on('popout-sidebar-click', (_, itemId) => cb(itemId)); },
+  onPopoutRefsClick: (cb) => { ipcRenderer.on('popout-refs-click', (_, tabId) => cb(tabId)); },
 
   // Editor popout
   setEditorPopoutData: (data) => ipcRenderer.invoke('set-editor-popout-data', data),
   onEditorPopoutChange: (cb) => { ipcRenderer.on('editor-popout-change', (_, tabId, content) => cb(tabId, content)); },
-  onEditorPopoutSave: (cb) => { ipcRenderer.on('editor-popout-save', () => cb()); }
+  onEditorPopoutSave: (cb) => { ipcRenderer.on('editor-popout-save', () => cb()); },
+
+  // Preview popout
+  setPreviewPopoutData: (data) => ipcRenderer.invoke('set-preview-popout-data', data),
+
+  // Guides
+  getGuidesPath: () => ipcRenderer.invoke('get-guides-path')
 });

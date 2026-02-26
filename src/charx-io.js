@@ -193,6 +193,100 @@ function saveCharx(filePath, data) {
   zip.writeZip(filePath);
 }
 
+/**
+ * Open and parse a standalone .risum file
+ * @param {string} filePath - path to .risum file
+ * @returns {object} parsed data structure (same shape as openCharx)
+ */
+function openRisum(filePath) {
+  const buf = fs.readFileSync(filePath);
+  const parsed = parseRisum(buf);
+  const mod = parsed.module?.module || parsed.module || {};
+
+  return {
+    _fileType: 'risum',
+
+    // Module metadata
+    name: mod.name || path.basename(filePath, '.risum'),
+    description: mod.description || '',
+    moduleId: mod.id || '',
+    moduleName: mod.name || '',
+    moduleDescription: mod.description || '',
+
+    // Editable content
+    lua: mod.trigger?.[0]?.effect?.[0]?.code || '',
+    lorebook: mod.lorebook || [],
+    regex: mod.regex || [],
+
+    // charx-only fields (empty for risum)
+    firstMessage: '',
+    globalNote: '',
+    css: '',
+    defaultVariables: '',
+    personality: '',
+    scenario: '',
+    creatorcomment: '',
+    tags: [],
+
+    // Assets
+    assets: [],
+    xMeta: {},
+    risumAssets: parsed.assets || [],
+    cardAssets: [],
+
+    // Preserve original data for save
+    _moduleData: parsed.module,
+    _risuExt: {},
+    _card: { spec: 'chara_card_v3', spec_version: '3.0', data: { extensions: { risuai: {} } } }
+  };
+}
+
+/**
+ * Save data back to a standalone .risum file
+ * @param {string} filePath - output path
+ * @param {object} data - data structure from openRisum (possibly modified)
+ */
+function saveRisum(filePath, data) {
+  const moduleJson = data._moduleData ? JSON.parse(JSON.stringify(data._moduleData)) : {
+    type: 'risuModule',
+    module: {
+      name: data.moduleName || data.name || 'Module',
+      description: data.moduleDescription || '',
+      id: data.moduleId || generateUUID(),
+      trigger: [],
+      regex: [],
+      lorebook: [],
+      assets: []
+    }
+  };
+
+  const mod = moduleJson.module || moduleJson;
+
+  // Update module name/description
+  mod.name = data.moduleName || data.name || mod.name;
+  mod.description = data.moduleDescription || data.description || mod.description;
+
+  // Lua → trigger
+  if (data.lua) {
+    mod.trigger = [{
+      comment: '',
+      type: 'start',
+      conditions: [],
+      effect: [{ type: 'triggerlua', code: data.lua }],
+      lowLevelAccess: false
+    }];
+  } else {
+    mod.trigger = mod.trigger || [];
+  }
+
+  // Regex & Lorebook
+  mod.regex = data.regex || [];
+  mod.lorebook = data.lorebook || [];
+
+  const risumBuf = buildRisum(moduleJson, data.risumAssets || []);
+  fs.writeFileSync(filePath, risumBuf);
+}
+
 function generateUUID() {
   return 'xxxxxxxx-xxxx-4xxx-yxxx-xxxxxxxxxxxx'.replace(/[xy]/g, (c) => {
     const r = Math.random() * 16 | 0;
@@ -200,4 +294,4 @@ function generateUUID() {
   });
 }
 
-module.exports = { openCharx, saveCharx };
+module.exports = { openCharx, saveCharx, openRisum, saveRisum };

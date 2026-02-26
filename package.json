@@ -1,6 +1,6 @@
 {
   "name": "risutoki",
-  "version": "0.1.0-beta",
+  "version": "0.2.0-beta",
   "description": "RisuAI .charx file editor with integrated terminal and MomoTalk UI",
   "main": "main.js",
   "scripts": {
@@ -17,7 +17,8 @@
     "@xterm/xterm": "^5.5.0",
     "adm-zip": "^0.5.16",
     "monaco-editor": "^0.52.2",
-    "node-pty": "^1.1.0"
+    "node-pty": "^1.1.0",
+    "wasmoon": "^1.16.0"
   },
   "devDependencies": {
     "electron": "^33.4.11",
