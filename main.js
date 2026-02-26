@@ -1289,7 +1289,9 @@ function combineCssSections(sections) {
   const body = sections.map(s =>
     `/* ${eq}\n   ${s.name}\n   ${eq} */\n${s.content}`
   ).join('\n\n');
-  return _cssStylePrefix + body + _cssStyleSuffix;
+  const prefix = _cssStylePrefix || '<style>\n';
+  const suffix = _cssStyleSuffix || '\n</style>';
+  return prefix + body + suffix;
 }
 
 // --- Cached Section Parsing (for MCP API hot path) ---
@@ -1342,6 +1344,12 @@ function applyUpdates(data, fields) {
   for (const key of allowed) {
     if (fields[key] !== undefined) {
       data[key] = fields[key];
+    }
+  }
+  // CSS 필드에 <style> 태그가 없으면 강제로 감싸기
+  if (fields.css !== undefined && data.css && data.css.trim()) {
+    if (!/<style[\s>]/i.test(data.css)) {
+      data.css = '<style>\n' + data.css + '\n</style>';
     }
   }
 }

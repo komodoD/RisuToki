@@ -1928,7 +1928,9 @@ function combineCssSections() {
   const body = cssSections.map(s =>
     `/* ${eq}\n   ${s.name}\n   ${eq} */\n${s.content}`
   ).join('\n\n');
-  return _cssStylePrefix + body + _cssStyleSuffix;
+  const prefix = _cssStylePrefix || '<style>\n';
+  const suffix = _cssStyleSuffix || '\n</style>';
+  return prefix + body + suffix;
 }
 
 async function addLuaSection() {
@@ -5437,7 +5439,17 @@ function collectDirtyFields() {
         // Map tab id to data field
         if (tab.id === 'lua' || tab.id.startsWith('lua_s')) {
           fields.lua = fileData.lua;
-        } else if (['globalNote', 'firstMessage', 'css', 'defaultVariables', 'description', 'name'].includes(tab.id)) {
+        } else if (tab.id.startsWith('css_s')) {
+          // CSS 개별 섹션 → combineCssSections()로 이미 fileData.css에 <style> 포함
+          fields.css = fileData.css;
+        } else if (tab.id === 'css') {
+          // CSS 저장 시 <style> 태그 없으면 강제 감싸기
+          let cssVal = val;
+          if (cssVal && cssVal.trim() && !/<style[\s>]/i.test(cssVal)) {
+            cssVal = '<style>\n' + cssVal + '\n</style>';
+          }
+          fields.css = cssVal;
+        } else if (['globalNote', 'firstMessage', 'defaultVariables', 'description', 'name'].includes(tab.id)) {
           fields[tab.id] = val;
         }
       }
@@ -5777,9 +5789,21 @@ async function showPreviewPanel() {
     return text;
   }
 
+  // ── Wrap CSS in <style> if not already wrapped ──
+  function wrapCssForPreview(raw) {
+    if (!raw || !raw.trim()) return '';
+    // Check raw input for <style> tag BEFORE CBS processing
+    const hasStyleTag = /<style[\s>]/i.test(raw);
+    const processed = PreviewEngine.risuChatParser(raw, { runVar: true });
+    // Already has <style> tag → use as-is (backgroundHTML with mixed HTML+CSS)
+    if (hasStyleTag) return processed;
+    // Pure CSS → wrap in <style>
+    return '<style>\n' + processed + '\n</style>';
+  }
+
   // ── Build iframe HTML document ──
   function buildChatDoc() {
-    const processedCSS = PreviewEngine.risuChatParser(charData.css || '', { runVar: true });
+    const processedCSS = wrapCssForPreview(charData.css || '');
 
     return `<!DOCTYPE html><html><head><meta charset="UTF-8">
 <meta http-equiv="Content-Security-Policy" content="default-src * 'unsafe-inline' 'unsafe-eval'; img-src * data: blob:; style-src * 'unsafe-inline'; font-src * data: blob:; media-src * data: blob:; connect-src * data: blob:;">
@@ -6033,7 +6057,7 @@ document.addEventListener('click', function(e) {
     if (!doc) return;
     const bgDom = doc.getElementById('bg-dom');
     if (bgDom) {
-      let processed = PreviewEngine.risuChatParser(charData.css || '', { runVar: true });
+      let processed = wrapCssForPreview(charData.css || '');
       // Append Lua setOutput HTML
       const luaHTML = PreviewEngine.getLuaOutputHTML();
       if (luaHTML) {
