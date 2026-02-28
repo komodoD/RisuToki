@@ -137,11 +137,20 @@ app.whenReady().then(() => {
 app.on('window-all-closed', () => {
   if (ptyProcess) { ptyProcess.kill(); ptyProcess = null; }
   if (apiServer) { apiServer.close(); apiServer = null; }
-  // Cleanup .mcp.json from CWD
+  // Cleanup risutoki from ~/.mcp.json (preserve other servers)
   try {
-    const cwd = currentFilePath ? path.dirname(currentFilePath) : process.cwd();
-    const mcpPath = path.join(cwd, '.mcp.json');
-    if (fs.existsSync(mcpPath)) fs.unlinkSync(mcpPath);
+    const mcpPath = path.join(os.homedir(), '.mcp.json');
+    if (fs.existsSync(mcpPath)) {
+      const config = JSON.parse(fs.readFileSync(mcpPath, 'utf-8'));
+      if (config.mcpServers && config.mcpServers.risutoki) {
+        delete config.mcpServers.risutoki;
+        if (Object.keys(config.mcpServers).length === 0) {
+          fs.unlinkSync(mcpPath);
+        } else {
+          fs.writeFileSync(mcpPath, JSON.stringify(config, null, 2), 'utf-8');
+        }
+      }
+    }
   } catch (e) { /* ignore */ }
   // Cleanup Codex MCP config
   cleanupCodexMcpConfig();
@@ -301,7 +310,7 @@ ipcMain.handle('save-file-as', async (_, updatedFields) => {
 // Get current file path (for terminal context)
 ipcMain.handle('get-file-path', () => currentFilePath);
 
-// Open reference file (read-only, doesn't replace main file)
+// Open reference file (read-only, doesn't replace main file) — supports multi-select
 ipcMain.handle('open-reference', async () => {
   try {
     const result = await dialog.showOpenDialog(mainWindow, {
@@ -310,21 +319,27 @@ ipcMain.handle('open-reference', async () => {
         { name: 'Character Card', extensions: ['charx'] },
         { name: 'RisuAI Module', extensions: ['risum'] }
       ],
-      properties: ['openFile']
+      properties: ['openFile', 'multiSelections']
     });
-    if (result.canceled || !result.filePaths[0]) return null;
-    const refPath = result.filePaths[0];
-    const refData = refPath.endsWith('.risum') ? openRisum(refPath) : openCharx(refPath);
-    const ref = {
-      fileName: path.basename(refPath),
-      filePath: refPath,
-      data: serializeForRenderer(refData)
-    };
-    // Store for MCP access (prevent duplicate)
-    if (!referenceFiles.some(r => r.fileName === ref.fileName)) {
-      referenceFiles.push(ref);
+    if (result.canceled || !result.filePaths.length) return null;
+    const refs = [];
+    for (const refPath of result.filePaths) {
+      try {
+        const refData = refPath.endsWith('.risum') ? openRisum(refPath) : openCharx(refPath);
+        const ref = {
+          fileName: path.basename(refPath),
+          filePath: refPath,
+          data: serializeForRenderer(refData)
+        };
+        if (!referenceFiles.some(r => r.fileName === ref.fileName)) {
+          referenceFiles.push(ref);
+        }
+        refs.push(ref);
+      } catch (e) {
+        console.error('[main] open-reference error for:', refPath, e);
+      }
     }
-    return ref;
+    return refs.length === 1 ? refs[0] : refs;
   } catch (err) {
     console.error('[main] open-reference error:', err);
     return null;
@@ -501,28 +516,34 @@ ipcMain.handle('get-mcp-info', () => {
 function writeCurrentMcpConfig() {
   if (!apiPort || !apiToken) return null;
 
-  const cwd = currentFilePath ? path.dirname(currentFilePath) : app.getPath('userData');
-  const configPath = path.join(cwd, '.mcp.json');
+  // Write to home directory (~/.mcp.json) for user-level MCP config
+  // Claude Code reads this regardless of project context
+  // Merge with existing config to preserve other MCP servers
+  const configPath = path.join(os.homedir(), '.mcp.json');
 
   let serverPath = path.join(__dirname, 'toki-mcp-server.js');
   if (app.isPackaged) {
     serverPath = serverPath.replace('app.asar', 'app.asar.unpacked');
   }
 
-  const config = {
-    mcpServers: {
-      'risutoki': {
-        type: 'stdio',
-        command: 'node',
-        args: [serverPath],
-        env: {
-          TOKI_PORT: String(apiPort),
-          TOKI_TOKEN: apiToken
-        }
-      }
+  let existing = {};
+  try {
+    if (fs.existsSync(configPath)) {
+      existing = JSON.parse(fs.readFileSync(configPath, 'utf-8'));
+    }
+  } catch (e) { /* ignore parse errors */ }
+
+  if (!existing.mcpServers) existing.mcpServers = {};
+  existing.mcpServers['risutoki'] = {
+    type: 'stdio',
+    command: 'node',
+    args: [serverPath],
+    env: {
+      TOKI_PORT: String(apiPort),
+      TOKI_TOKEN: apiToken
     }
   };
-  fs.writeFileSync(configPath, JSON.stringify(config, null, 2), 'utf-8');
+  fs.writeFileSync(configPath, JSON.stringify(existing, null, 2), 'utf-8');
   console.log('[main] MCP config written:', configPath);
   return configPath;
 }
@@ -903,6 +924,9 @@ ipcMain.handle('write-system-prompt', (_, content) => {
 // --- Guides ---
 // Packaged: extraResources → process.resourcesPath/guides
 // Dev: __dirname/guides
+// Session guides: imported guides stored in memory only (not saved to disk)
+let sessionGuides = []; // [{ filename, content }]
+
 function getGuidesDir() {
   return app.isPackaged
     ? path.join(process.resourcesPath, 'guides')
@@ -911,12 +935,20 @@ function getGuidesDir() {
 
 ipcMain.handle('list-guides', () => {
   const guidesDir = getGuidesDir();
+  let builtIn = [];
   try {
-    return fs.readdirSync(guidesDir).filter(f => f.endsWith('.md')).sort();
-  } catch (e) { return []; }
+    builtIn = fs.readdirSync(guidesDir).filter(f => f.endsWith('.md')).sort();
+  } catch (e) { /* ignore */ }
+  const sessionNames = sessionGuides.map(g => g.filename);
+  // Return { builtIn, session } so renderer can distinguish
+  return { builtIn, session: sessionNames };
 });
 
 ipcMain.handle('read-guide', (_, filename) => {
+  // Check session guides first
+  const sg = sessionGuides.find(g => g.filename === filename);
+  if (sg) return sg.content;
+  // Fall back to disk
   const filePath = path.join(getGuidesDir(), filename);
   try {
     return fs.readFileSync(filePath, 'utf-8');
@@ -924,6 +956,10 @@ ipcMain.handle('read-guide', (_, filename) => {
 });
 
 ipcMain.handle('write-guide', (_, filename, content) => {
+  // Check if it's a session guide
+  const sg = sessionGuides.find(g => g.filename === filename);
+  if (sg) { sg.content = content; return true; }
+  // Otherwise write to disk (built-in)
   const guidesDir = getGuidesDir();
   try { fs.mkdirSync(guidesDir, { recursive: true }); } catch (e) { /* exists */ }
   try { fs.writeFileSync(path.join(guidesDir, filename), content, 'utf-8'); return true; } catch (e) { return false; }
@@ -931,20 +967,42 @@ ipcMain.handle('write-guide', (_, filename, content) => {
 
 ipcMain.handle('import-guide', async () => {
   const result = await dialog.showOpenDialog(mainWindow, {
-    title: '가이드 파일 불러오기',
+    title: '가이드 파일 불러오기 (세션 전용)',
     filters: [{ name: 'Markdown / Text', extensions: ['md', 'txt'] }],
     properties: ['openFile', 'multiSelections']
   });
   if (result.canceled || !result.filePaths.length) return [];
-  const guidesDir = getGuidesDir();
-  try { fs.mkdirSync(guidesDir, { recursive: true }); } catch (e) { /* exists */ }
   const imported = [];
+  // Collect all existing names (built-in + session) for dedup
+  const guidesDir = getGuidesDir();
+  let builtInNames = [];
+  try { builtInNames = fs.readdirSync(guidesDir).filter(f => f.endsWith('.md')); } catch (e) { /* ignore */ }
   for (const fp of result.filePaths) {
-    const name = path.basename(fp);
-    const dest = path.join(guidesDir, name);
-    try { fs.copyFileSync(fp, dest); imported.push(name); } catch (e) { /* skip */ }
+    let name = path.basename(fp);
+    try {
+      const content = fs.readFileSync(fp, 'utf-8');
+      // Auto-rename if name conflicts with built-in or existing session guide
+      const ext = path.extname(name);
+      const base = name.slice(0, -ext.length);
+      let n = 1;
+      while (builtInNames.includes(name) || sessionGuides.some(g => g.filename === name)) {
+        n++;
+        name = `${base} (${n})${ext}`;
+      }
+      sessionGuides.push({ filename: name, content });
+      imported.push(name);
+    } catch (e) { /* skip */ }
   }
   return imported;
+});
+
+ipcMain.handle('delete-guide', (_, filename) => {
+  // Check session guide first
+  const sgIdx = sessionGuides.findIndex(g => g.filename === filename);
+  if (sgIdx >= 0) { sessionGuides.splice(sgIdx, 1); return true; }
+  // Fall back to disk
+  const filePath = path.join(getGuidesDir(), filename);
+  try { fs.unlinkSync(filePath); return true; } catch (e) { return false; }
 });
 
 // --- Popout Windows ---

@@ -810,15 +810,28 @@ function buildSidebar() {
   tree.appendChild(lbFolder.header);
   tree.appendChild(lbFolder.children);
 
-  // Lorebook folder right-click: add folder/entry / import
+  // Lorebook folder right-click: add folder/entry / import / bulk delete
   lbFolder.header.addEventListener('contextmenu', (e) => {
     e.preventDefault(); e.stopPropagation();
-    showContextMenu(e.clientX, e.clientY, [
+    const items = [
       { label: '새 항목 추가', action: () => addNewLorebook() },
       { label: '새 폴더 추가', action: () => addNewLorebookFolder() },
       '---',
       { label: 'JSON 파일 가져오기', action: () => importLorebook() },
-    ]);
+    ];
+    if (fileData.lorebook.length > 0) {
+      items.push('---');
+      items.push({ label: `전체 삭제 (${fileData.lorebook.length}개)`, action: async () => {
+        if (!await showConfirm(`로어북 전체 ${fileData.lorebook.length}개 항목을 삭제하시겠습니까?\n이 작업은 되돌릴 수 없습니다.`)) return;
+        // Close all lorebook tabs
+        for (let i = fileData.lorebook.length - 1; i >= 0; i--) closeTab(`lore_${i}`);
+        fileData.lorebook = [];
+        dirtyFields.add('lorebook');
+        buildSidebar();
+        setStatus('로어북 전체 삭제됨');
+      }});
+    }
+    showContextMenu(e.clientX, e.clientY, items);
   });
 
   // Group lorebook by folder (robust multi-key matching)
@@ -856,6 +869,76 @@ function buildSidebar() {
     lbFolder.children.appendChild(subFolder.header);
     lbFolder.children.appendChild(subFolder.children);
 
+    // Lorebook folder right-click: rename / add entry / delete contents / delete folder
+    const folderIdx = folder.index;
+    const folderChildren = folder.children;
+    subFolder.header.addEventListener('contextmenu', (e) => {
+      e.preventDefault(); e.stopPropagation();
+      const fEntry = fileData.lorebook[folderIdx];
+      const folderId = `folder:${fEntry.key || fEntry.comment || folderIdx}`;
+      showContextMenu(e.clientX, e.clientY, [
+        { label: '이름 변경', action: async () => {
+          const newName = await showPrompt('폴더 이름', fEntry.comment || '');
+          if (!newName) return;
+          fEntry.comment = newName;
+          dirtyFields.add('lorebook');
+          buildSidebar();
+          setStatus(`폴더 이름 변경: ${newName}`);
+        }},
+        { label: '새 항목 추가', action: () => {
+          const newEntry = {
+            key: '', content: '', comment: `new_entry_${fileData.lorebook.length}`,
+            mode: 'normal', insertorder: 100, alwaysActive: false, forceActivation: false,
+            selective: false, secondkey: '', constant: false,
+            order: fileData.lorebook.length, folder: folderId
+          };
+          fileData.lorebook.push(newEntry);
+          dirtyFields.add('lorebook');
+          buildSidebar();
+          const idx = fileData.lorebook.length - 1;
+          openTab(`lore_${idx}`, newEntry.comment, '_loreform',
+            () => fileData.lorebook[idx], (v) => { Object.assign(fileData.lorebook[idx], v); });
+          setStatus('폴더에 새 항목 추가됨');
+        }},
+        '---',
+        ...(folderChildren.length > 0 ? [{ label: `내용 일괄 삭제 (${folderChildren.length}개)`, action: async () => {
+          if (!await showConfirm(`"${fEntry.comment}" 폴더 내 ${folderChildren.length}개 항목을 모두 삭제하시겠습니까?`)) return;
+          const indices = folderChildren.map(c => c.index).sort((a, b) => b - a);
+          for (const i of indices) {
+            closeTab(`lore_${i}`);
+            fileData.lorebook.splice(i, 1);
+          }
+          dirtyFields.add('lorebook');
+          buildSidebar();
+          setStatus(`${indices.length}개 항목 삭제됨`);
+        }}] : []),
+        { label: '폴더 삭제 (폴더만)', action: async () => {
+          if (!await showConfirm(`"${fEntry.comment}" 폴더를 삭제하시겠습니까?\n내부 항목은 루트로 이동됩니다.`)) return;
+          // Move children to root
+          for (const child of folderChildren) {
+            fileData.lorebook[child.index].folder = '';
+          }
+          closeTab(`lore_${folderIdx}`);
+          fileData.lorebook.splice(folderIdx, 1);
+          dirtyFields.add('lorebook');
+          buildSidebar();
+          setStatus(`폴더 삭제됨: ${fEntry.comment}`);
+        }},
+        { label: '폴더+내용 전체 삭제', action: async () => {
+          const total = folderChildren.length + 1;
+          if (!await showConfirm(`"${fEntry.comment}" 폴더와 내부 ${folderChildren.length}개 항목을 모두 삭제하시겠습니까?`)) return;
+          const indices = [folderIdx, ...folderChildren.map(c => c.index)].sort((a, b) => b - a);
+          for (const i of indices) {
+            closeTab(`lore_${i}`);
+            fileData.lorebook.splice(i, 1);
+          }
+          dirtyFields.add('lorebook');
+          buildSidebar();
+          setStatus(`폴더+내용 삭제됨 (${total}개)`);
+        }},
+      ]);
+    });
+
     for (const child of folder.children) {
       const entryEl = createLoreEntryItem(child, 2);
       subFolder.children.appendChild(entryEl);
@@ -872,13 +955,25 @@ function buildSidebar() {
   tree.appendChild(rxFolder.header);
   tree.appendChild(rxFolder.children);
 
-  // Regex folder right-click: add / import
+  // Regex folder right-click: add / import / bulk delete
   rxFolder.header.addEventListener('contextmenu', (e) => {
     e.preventDefault(); e.stopPropagation();
-    showContextMenu(e.clientX, e.clientY, [
+    const items = [
       { label: '새 항목 추가', action: () => addNewRegex() },
       { label: 'JSON 파일 가져오기', action: () => importRegex() },
-    ]);
+    ];
+    if (fileData.regex.length > 0) {
+      items.push('---');
+      items.push({ label: `전체 삭제 (${fileData.regex.length}개)`, action: async () => {
+        if (!await showConfirm(`정규식 전체 ${fileData.regex.length}개 항목을 삭제하시겠습니까?\n이 작업은 되돌릴 수 없습니다.`)) return;
+        for (let i = fileData.regex.length - 1; i >= 0; i--) closeTab(`regex_${i}`);
+        fileData.regex = [];
+        dirtyFields.add('regex');
+        buildSidebar();
+        setStatus('정규식 전체 삭제됨');
+      }});
+    }
+    showContextMenu(e.clientX, e.clientY, items);
   });
 
   for (let i = 0; i < fileData.regex.length; i++) {
@@ -968,15 +1063,20 @@ async function addReferenceFile() {
   const result = await window.tokiAPI.openReference();
   if (!result) return;
 
-  // Prevent duplicate
-  if (referenceFiles.some(r => r.fileName === result.fileName)) {
-    setStatus(`이미 로드됨: ${result.fileName}`);
-    return;
+  // Handle both single and multiple results
+  const refs = Array.isArray(result) ? result : [result];
+  let added = 0;
+  for (const ref of refs) {
+    if (referenceFiles.some(r => r.fileName === ref.fileName)) continue;
+    referenceFiles.push(ref);
+    added++;
   }
-
-  referenceFiles.push(result);
-  buildRefsSidebar();
-  setStatus(`참고 파일 추가: ${result.fileName}`);
+  if (added > 0) {
+    buildRefsSidebar();
+    setStatus(`참고 파일 추가: ${added}개`);
+  } else {
+    setStatus('이미 로드된 파일입니다');
+  }
 }
 
 // ==================== Sidebar Refs Tab ====================
@@ -987,7 +1087,10 @@ async function buildRefsSidebar() {
   refsEl.innerHTML = '';
 
   // Guides folder
-  const files = await window.tokiAPI.listGuides();
+  const guideData = await window.tokiAPI.listGuides();
+  // Support both old (string[]) and new ({ builtIn, session }) format
+  const builtInFiles = guideData?.builtIn || (Array.isArray(guideData) ? guideData : []);
+  const sessionFiles = guideData?.session || [];
   const guideFolder = createFolderItem('가이드', '📖', 0);
   refsEl.appendChild(guideFolder.header);
   refsEl.appendChild(guideFolder.children);
@@ -1002,55 +1105,74 @@ async function buildRefsSidebar() {
         const fn = name.endsWith('.md') ? name : name + '.md';
         await window.tokiAPI.writeGuide(fn, '');
         buildRefsSidebar();
-        // Open in editor
         openTab(`guide_${fn}`, `[가이드] ${fn}`, 'plaintext',
           () => '', (val) => { window.tokiAPI.writeGuide(fn, val); });
         setStatus(`가이드 생성: ${fn}`);
       }},
-      { label: '가이드 불러오기', action: async () => {
+      { label: '가이드 불러오기 (세션 전용)', action: async () => {
         const imported = await window.tokiAPI.importGuide();
         if (imported.length > 0) {
           buildRefsSidebar();
-          setStatus(`가이드 불러옴: ${imported.join(', ')}`);
+          setStatus(`가이드 불러옴 (세션): ${imported.join(', ')}`);
         }
       }},
     ]);
   });
 
-  if (files) {
-    for (const fileName of files) {
-      const el = createTreeItem(fileName, '·', 1);
-      el.addEventListener('click', async () => {
-        const tabId = `guide_${fileName}`;
-        const existing = openTabs.find(t => t.id === tabId);
-        if (existing) {
-          activeTabId = tabId;
-          createOrSwitchEditor(existing);
-          updateTabUI();
-          return;
-        }
-        const content = await window.tokiAPI.readGuide(fileName);
-        if (content == null) { setStatus('가이드 파일 읽기 실패'); return; }
-        openTab(tabId, `[가이드] ${fileName}`, 'plaintext',
-          () => content,
-          (val) => { window.tokiAPI.writeGuide(fileName, val); }
-        );
-      });
-      // Right-click: copy name / path
-      el.addEventListener('contextmenu', (e) => {
-        e.preventDefault(); e.stopPropagation();
-        showContextMenu(e.clientX, e.clientY, [
-          { label: '이름 복사', action: () => { navigator.clipboard.writeText(fileName); setStatus(`복사됨: ${fileName}`); } },
-          { label: '경로 복사', action: async () => {
-            const guidesDir = await window.tokiAPI.getGuidesPath();
-            const fullPath = guidesDir ? `${guidesDir.replace(/\\/g, '/')}/${fileName}` : `guides/${fileName}`;
-            navigator.clipboard.writeText(fullPath);
-            setStatus(`복사됨: ${fullPath}`);
-          }},
-        ]);
-      });
-      guideFolder.children.appendChild(el);
-    }
+  // Helper: create guide item with click + context menu
+  function addGuideItem(fileName, isSession) {
+    const prefix = isSession ? '⏳ ' : '';
+    const el = createTreeItem(prefix + fileName, '·', 1);
+    el.addEventListener('click', async () => {
+      const tabId = `guide_${fileName}`;
+      const existing = openTabs.find(t => t.id === tabId);
+      if (existing) {
+        activeTabId = tabId;
+        createOrSwitchEditor(existing);
+        updateTabUI();
+        return;
+      }
+      const content = await window.tokiAPI.readGuide(fileName);
+      if (content == null) { setStatus('가이드 파일 읽기 실패'); return; }
+      openTab(tabId, `[가이드] ${fileName}`, 'plaintext',
+        () => content,
+        (val) => { window.tokiAPI.writeGuide(fileName, val); }
+      );
+    });
+    el.addEventListener('contextmenu', (e) => {
+      e.preventDefault(); e.stopPropagation();
+      const items = [
+        { label: '이름 복사', action: () => { navigator.clipboard.writeText(fileName); setStatus(`복사됨: ${fileName}`); } },
+      ];
+      if (!isSession) {
+        items.push({ label: '경로 복사', action: async () => {
+          const guidesDir = await window.tokiAPI.getGuidesPath();
+          const fullPath = guidesDir ? `${guidesDir.replace(/\\/g, '/')}/${fileName}` : `guides/${fileName}`;
+          navigator.clipboard.writeText(fullPath);
+          setStatus(`복사됨: ${fullPath}`);
+        }});
+      }
+      items.push('---');
+      items.push({ label: isSession ? '제거' : '삭제', action: async () => {
+        const msg = isSession ? `"${fileName}" 세션 가이드를 제거하시겠습니까?` : `"${fileName}" 가이드를 삭제하시겠습니까?`;
+        if (!await showConfirm(msg)) return;
+        closeTab(`guide_${fileName}`);
+        await window.tokiAPI.deleteGuide(fileName);
+        buildRefsSidebar();
+        setStatus(isSession ? `가이드 제거됨: ${fileName}` : `가이드 삭제됨: ${fileName}`);
+      }});
+      showContextMenu(e.clientX, e.clientY, items);
+    });
+    guideFolder.children.appendChild(el);
+  }
+
+  for (const fileName of builtInFiles) addGuideItem(fileName, false);
+  if (sessionFiles.length > 0) {
+    // Separator between built-in and session guides
+    const sep = document.createElement('div');
+    sep.style.cssText = 'height:1px;background:var(--border-color);margin:4px 8px;';
+    guideFolder.children.appendChild(sep);
+    for (const fileName of sessionFiles) addGuideItem(fileName, true);
   }
 
   // Reference files section
@@ -2439,11 +2561,13 @@ async function initTerminal() {
       term.clearSelection();
       return false; // prevent sending to pty
     }
-    // Ctrl+V → paste
-    if (e.ctrlKey && e.key === 'v' && e.type === 'keydown') {
-      navigator.clipboard.readText().then(text => {
-        if (text) window.tokiAPI.terminalInput(text);
-      });
+    // Ctrl+V → paste (block both keydown and keyup to prevent double paste)
+    if (e.ctrlKey && e.key === 'v') {
+      if (e.type === 'keydown') {
+        navigator.clipboard.readText().then(text => {
+          if (text) window.tokiAPI.terminalInput(text);
+        });
+      }
       return false;
     }
     return true;
@@ -3651,6 +3775,8 @@ function resetLayout() {
 async function restartTerminal() {
   if (!term) return;
   await window.tokiAPI.terminalStop();
+  // Wait for pty to fully terminate before starting a new one
+  await new Promise(r => setTimeout(r, 200));
   term.clear();
   await window.tokiAPI.terminalStart(term.cols, term.rows);
   setStatus('터미널 재시작됨');
@@ -3781,6 +3907,12 @@ async function handleClaudeStart() {
       lines.push(`- read_reference_field(index, field): 참고 파일의 필드 읽기 (읽기 전용)`);
       lines.push(`write/add/delete 도구 사용 시 에디터에서 사용자 확인 팝업이 뜹니다.`);
       lines.push(`도구를 적극 활용하여 사용자의 요청을 수행하세요.`);
+      lines.push(``);
+      lines.push(`== 중요: 읽기 규칙 ==`);
+      lines.push(`- lua, css 필드는 반드시 섹션 단위로 읽으세요: list_lua → read_lua(index)`);
+      lines.push(`- read_field("lua")나 read_field("css")는 전체를 한번에 반환하므로 사용하지 마세요`);
+      lines.push(`- 로어북도 list_lorebook → read_lorebook(index) 순서로 개별 읽기`);
+      lines.push(`- 정규식도 list_regex → read_regex(index) 순서로 개별 읽기`);
     } else {
       lines.push(`편집 중인 항목의 내용을 알려주면 수정을 도와드리겠습니다.`);
     }
@@ -3883,6 +4015,12 @@ async function handleCodexStart() {
       `- read_reference_field(index, field): 참고 파일의 필드 읽기 (읽기 전용)`,
       `write/add/delete 도구 사용 시 에디터에서 사용자 확인 팝업이 뜹니다.`,
       `도구를 적극 활용하여 사용자의 요청을 수행하세요.`,
+      ``,
+      `== 중요: 읽기 규칙 ==`,
+      `- lua, css 필드는 반드시 섹션 단위로 읽으세요: list_lua → read_lua(index)`,
+      `- read_field("lua")나 read_field("css")는 전체를 한번에 반환하므로 사용하지 마세요`,
+      `- 로어북도 list_lorebook → read_lorebook(index) 순서로 개별 읽기`,
+      `- 정규식도 list_regex → read_regex(index) 순서로 개별 읽기`,
     ];
     // Append RP persona if enabled
     const rpText = await loadRpPersona();

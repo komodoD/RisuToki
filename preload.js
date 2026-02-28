@@ -69,6 +69,7 @@ contextBridge.exposeInMainWorld('tokiAPI', {
   readGuide: (filename) => ipcRenderer.invoke('read-guide', filename),
   writeGuide: (filename, content) => ipcRenderer.invoke('write-guide', filename, content),
   importGuide: () => ipcRenderer.invoke('import-guide'),
+  deleteGuide: (filename) => ipcRenderer.invoke('delete-guide', filename),
 
   // UI
   pickBgImage: () => ipcRenderer.invoke('pick-bg-image'),

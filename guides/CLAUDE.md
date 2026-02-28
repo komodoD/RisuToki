@@ -209,13 +209,19 @@ callAxModel(triggerId, systemPrompt, userPrompt, options)
 2. `write_lorebook(index, data)` — **변경할 필드만** 전달 (부분 수정 가능)
 3. comment 네이밍이 Lua 검색에 영향을 주므로 **기존 패턴과 일치**시킬 것
 
+### 중요: 읽기 규칙
+- **`read_field("lua")`와 `read_field("css")`는 사용하지 마세요** — 전체를 한번에 반환하여 컨텍스트를 낭비합니다
+- lua는 반드시 `list_lua` → `read_lua(index)` 순서로 섹션 단위 읽기
+- css는 반드시 `list_css` → `read_css(index)` 순서로 섹션 단위 읽기
+- 로어북은 `list_lorebook` → `read_lorebook(index)` 순서로 개별 읽기
+- 정규식은 `list_regex` → `read_regex(index)` 순서로 개별 읽기
+
 ### Lua 코드 수정 시
 1. `list_lua`로 섹션 목록 확인 (index, 이름, 크기)
 2. **소형 섹션** (수 KB): `read_lua(index)` → `write_lua(index, content)` 로 전체 교체
 3. **대형 섹션** (수십 KB+): 전체를 읽지 않고 아래 도구 사용
    - `replace_in_lua(index, find, replace)` — 문자열 치환 (정규식 지원)
    - `insert_in_lua(index, content, position, anchor?)` — 코드 삽입 (end/start/after/before)
-4. `read_field("lua")`는 전체 합산 반환 (수백 KB). 전체 탐색이 필요할 때만 사용
 
 ### CSS 코드 수정 시
 1. `list_css`로 섹션 목록 확인 (index, 이름, 크기)
@@ -223,12 +229,6 @@ callAxModel(triggerId, systemPrompt, userPrompt, options)
 3. **대형 섹션** (수십 KB+): 전체를 읽지 않고 아래 도구 사용
    - `replace_in_css(index, find, replace)` — 문자열 치환 (정규식 지원)
    - `insert_in_css(index, content, position, anchor?)` — 코드 삽입 (end/start/after/before)
-4. `read_field("css")`는 전체 합산 반환. 전체 탐색이 필요할 때만 사용
-
-### 대용량 필드 처리
-- `lua`, `css` 등 대용량 필드는 `read_field` 시 파일로 저장될 수 있음
-- 파일 경로가 반환되면 `Read`/`Grep` 도구로 탐색
-- 수정 시에는 전체 내용을 읽은 뒤 변경 부분만 교체하여 `write_field`
 
 ---
 
